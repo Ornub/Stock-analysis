@@ -143,8 +143,7 @@ def fetch_daily_data(
         )
 
         if raw is None or raw.empty:
-            print(f"[WARNING] jugaad-data returned no rows for {symbol}.")
-            return None
+            raise ValueError("jugaad-data returned empty result")
 
         df = _normalize_jugaad_columns(raw)
 
@@ -159,8 +158,8 @@ def fetch_daily_data(
         return df
 
     except Exception as exc:
-        print(f"[ERROR] jugaad-data fetch failed: {exc}")
-        return None
+        print(f"[WARNING] jugaad-data failed ({exc}). Falling back to yfinance …")
+        return fetch_intraday_data(symbol, "NSE", "ONE_DAY", from_date, to_date)
 
 
 # ---------------------------------------------------------------------------
