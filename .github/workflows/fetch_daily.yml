@@ -31,22 +31,27 @@ jobs:
       - name: Fetch stock data
         run: python run_daily.py
 
-      # Keeps a downloadable ZIP of today's CSVs for 90 days
+      - name: Generate swing trading signals
+        run: python swing_signals.py
+
+      # Keeps a downloadable ZIP of today's CSVs + signals for 90 days
       # Access via: GitHub → Actions → (this run) → Artifacts
-      - name: Upload CSVs as artifact
+      - name: Upload CSVs and signals as artifact
         uses: actions/upload-artifact@v4
         with:
           name: stock-data-${{ github.run_number }}-${{ github.run_attempt }}
-          path: data/*.csv
+          path: |
+            data/*.csv
+            swing_signals_*.csv
           retention-days: 90
 
-      # Commit the updated CSVs back to the repo so data/ always has the latest
-      - name: Commit updated CSVs
+      # Commit the updated CSVs and signal report back to the repo
+      - name: Commit updated CSVs and signals
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add data/ swing_signals_*.csv
           # Only create a commit when files actually changed
           git diff --staged --quiet || \
-            git commit -m "chore: auto-update stock data $(date -u '+%Y-%m-%d') [skip ci]"
+            git commit -m "chore: auto-update stock data + signals $(date -u '+%Y-%m-%d') [skip ci]"
           git push
