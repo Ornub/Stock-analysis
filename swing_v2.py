@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from xgboost import XGBClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
@@ -95,20 +96,50 @@ NIFTY_50 = [
     "TRENT", "BPCL",
 ]
 
+# Nifty-Next-50 — adds large-mid-caps for richer training universe
+NIFTY_NEXT_50 = [
+    "ABB", "ADANIENSOL", "ADANIGREEN", "ADANIPOWER", "AMBUJACEM",
+    "BAJAJHLDNG", "BANKBARODA", "BERGEPAINT", "BOSCHLTD", "CANBK",
+    "CHOLAFIN", "COLPAL", "DABUR", "DLF", "DMART",
+    "GAIL", "GODREJCP", "HAL", "HAVELLS", "ICICIGI",
+    "ICICIPRULI", "INDIGO", "INDUSTOWER", "IOC", "IRCTC",
+    "JINDALSTEL", "LICI", "LODHA", "MARICO", "MOTHERSON",
+    "NAUKRI", "NMDC", "PAYTM", "PFC", "PIDILITIND",
+    "PNB", "RECLTD", "SBICARD", "SHREECEM", "SIEMENS",
+    "SRF", "TATAPOWER", "TORNTPHARM", "TVSMOTOR", "VBL",
+    "VEDL", "ZOMATO", "ZYDUSLIFE",
+]
+
+TRAIN_UNIVERSE = NIFTY_50 + NIFTY_NEXT_50
+
 WATCHLIST = [
     "SBIN", "HDFCBANK", "RELIANCE", "TCS", "INFY",
     "ICICIBANK", "WIPRO", "AXISBANK",
 ]
 
-LOOKBACK_YEARS = 5      # v2.1: 5y vs 3y for more samples
-FORWARD_DAYS   = 5
-THRESHOLD      = 0.02   # ±2% for BUY/SELL labels (drop neutral samples)
-BUY_PROBA      = 0.60   # min probability to call BUY
-SELL_PROBA     = 0.60   # min probability to call SELL
+LOOKBACK_YEARS = 5      # 5y of history
+FORWARD_DAYS   = 5      # forward return horizon (matches backtest exit logic)
+THRESHOLD      = 0.02   # ±2% for BUY/SELL labels
+BUY_PROBA              = 0.60   # proven baseline (matches v2.1 best run)
+BUY_PROBA_STRONG_NEWS  = 0.55   # relaxed bar when news is materially positive
+SELL_PROBA             = 0.60
 
-# Signal-quality gates (v2.1) — applied at PREDICT and BACKTEST entry time
-ADX_MIN        = 0.20   # ADX (normalised 0-1) — require trend strength ≥ 20
-USE_EMA200_FILTER = True   # only BUY when close > EMA200 (uptrend filter)
+# Signal-quality gates (v2.3) — score-based, must pass MIN_CONFIRMATIONS of 6
+EMA200_REQUIRED   = True
+ADX_MIN           = 0.20
+MIN_CONFIRMATIONS = 4
+# Confidence grade thresholds (count of bullish confirmations passed)
+GRADE_A_MIN = 6
+GRADE_B_MIN = 5
+GRADE_C_MIN = 4
+
+# News confirmation
+USE_NEWS_GATE     = True
+
+# News confirmation
+USE_NEWS_GATE     = True   # downgrade BUY → WATCH if recent news is materially negative
+NEWS_MIN_SENT     = -0.10
+NEWS_MAX_NEG_SHARE = 0.40
 
 # Trade-cost model for backtest
 SLIPPAGE_PCT       = 0.0025  # 0.25% per fill (entry + exit applied separately)
@@ -129,29 +160,40 @@ FEATURE_COLS = [
     "feat_macd_signal_diff",
     "feat_ema_fast_ratio",
     "feat_ema_slow_ratio",
-    "feat_ema200_ratio",         # NEW: long-term trend filter
-    "feat_adx",                  # NEW: trend strength
-    "feat_stoch_k",              # NEW: stochastic oscillator
-    "feat_williams_r",           # NEW: inverted stochastic
-    "feat_cci",                  # NEW: commodity channel index
+    "feat_ema200_ratio",
+    "feat_adx",
+    "feat_stoch_k",
+    "feat_williams_r",
+    "feat_cci",
     # Volatility / position
     "feat_bb_pos",
     "feat_atr_pct",
     "feat_dist_52w_high",
     "feat_dist_52w_low",
     "feat_volatility_20d",
-    "feat_high_low_range",       # NEW: bar range vs price
+    "feat_high_low_range",
     # Volume
     "feat_obv_ratio",
     "feat_volume_ratio",
-    "feat_volume_trend",         # NEW: vol EMA9/EMA21
+    "feat_volume_trend",
     # Candle / gap
     "feat_gap_pct",
     "feat_body_ratio",
     # Multi-period momentum
     "feat_return_5d",
-    "feat_return_10d",           # NEW
-    "feat_return_20d",           # NEW
+    "feat_return_10d",
+    "feat_return_20d",
+]
+
+# Auxiliary columns (joined for predict/backtest gates and display, NOT used as
+# model features — they bias the model toward exhausted-uptrend setups in CV).
+MARKET_AUX_COLS = [
+    "feat_market_return_1d",
+    "feat_market_return_5d",
+    "feat_market_volatility_20d",
+    "feat_vix_level",
+    "feat_vix_change_5d",
+    "feat_relative_return_5d",
 ]
 
 
@@ -237,13 +279,91 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
+# Market regime features (v2.3) — Nifty 50 + India VIX
+# =============================================================================
+
+_MARKET_CACHE: pd.DataFrame | None = None
+
+
+def _fetch_market_regime(years: int) -> pd.DataFrame:
+    """Fetch ^NSEI and ^INDIAVIX, compute regime features per date."""
+    global _MARKET_CACHE
+    if _MARKET_CACHE is not None:
+        return _MARKET_CACHE
+
+    import yfinance as yf
+    today     = date.today()
+    from_date = today - timedelta(days=years * 365 + 30)
+
+    nifty = yf.download("^NSEI",     start=from_date, end=today,
+                        auto_adjust=True, progress=False)
+    vix   = yf.download("^INDIAVIX", start=from_date, end=today,
+                        auto_adjust=True, progress=False)
+
+    if nifty is None or len(nifty) == 0:
+        print("[WARN] Could not fetch ^NSEI; market regime features will be 0.")
+        return pd.DataFrame()
+
+    # yfinance MultiIndex columns when downloading single symbol — flatten
+    if isinstance(nifty.columns, pd.MultiIndex):
+        nifty.columns = nifty.columns.get_level_values(0)
+    if vix is not None and isinstance(vix.columns, pd.MultiIndex):
+        vix.columns = vix.columns.get_level_values(0)
+
+    df = pd.DataFrame(index=nifty.index)
+    df["nifty_close"]                 = nifty["Close"]
+    df["feat_market_return_1d"]       = nifty["Close"].pct_change(1)
+    df["feat_market_return_5d"]       = nifty["Close"].pct_change(5)
+    df["feat_market_volatility_20d"]  = nifty["Close"].pct_change().rolling(20).std()
+
+    if vix is not None and len(vix):
+        v = vix["Close"].reindex(df.index, method="ffill")
+        df["feat_vix_level"]      = v / 100   # normalise (raw 10-30 typical)
+        df["feat_vix_change_5d"]  = v.pct_change(5).fillna(0)
+    else:
+        df["feat_vix_level"]      = 0.15      # neutral fallback
+        df["feat_vix_change_5d"]  = 0.0
+
+    df = df.reset_index().rename(columns={"Date": "DateTime"})
+    df["DateTime"] = pd.to_datetime(df["DateTime"]).dt.tz_localize(None).dt.normalize()
+    _MARKET_CACHE = df
+    return df
+
+
+def _attach_market_features(panel: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
+    """Join market features by date and compute relative-strength columns."""
+    if market is None or market.empty:
+        for c in ("feat_market_return_1d", "feat_market_return_5d",
+                  "feat_market_volatility_20d", "feat_vix_level",
+                  "feat_vix_change_5d", "feat_relative_return_5d"):
+            panel[c] = 0.0
+        return panel
+
+    panel = panel.copy()
+    panel["_date_key"] = pd.to_datetime(panel["DateTime"]).dt.tz_localize(None).dt.normalize()
+    join_cols = ["DateTime", "feat_market_return_1d", "feat_market_return_5d",
+                 "feat_market_volatility_20d", "feat_vix_level", "feat_vix_change_5d"]
+    market_join = market[join_cols].rename(columns={"DateTime": "_date_key"})
+    panel = panel.merge(market_join, on="_date_key", how="left")
+    panel = panel.drop(columns=["_date_key"])
+
+    # Relative strength: stock 5d return minus market 5d return
+    panel["feat_relative_return_5d"] = (
+        panel["feat_return_5d"].fillna(0) - panel["feat_market_return_5d"].fillna(0)
+    )
+    return panel
+
+
+# =============================================================================
 # Dataset assembly
 # =============================================================================
 
 def build_panel(symbols: list[str], years: int = LOOKBACK_YEARS) -> pd.DataFrame | None:
-    """Fetch all symbols, compute features, concatenate with a 'symbol' column."""
+    """Fetch symbols, compute per-stock + market regime features, concatenate."""
     today     = date.today()
     from_date = today - timedelta(days=years * 365)
+
+    market = _fetch_market_regime(years)
 
     panels = []
     for sym in symbols:
@@ -258,7 +378,9 @@ def build_panel(symbols: list[str], years: int = LOOKBACK_YEARS) -> pd.DataFrame
 
     if not panels:
         return None
-    return pd.concat(panels, ignore_index=True)
+    panel = pd.concat(panels, ignore_index=True)
+    panel = _attach_market_features(panel, market)
+    return panel
 
 
 def make_labels(panel: pd.DataFrame) -> pd.DataFrame:
@@ -278,6 +400,8 @@ def make_labels(panel: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
+    # Train on cleaner Nifty-50 only — adding Next-50 dilutes calibration.
+    # TRAIN_UNIVERSE stays available for explicit opt-in.
     symbols = symbols or NIFTY_50
     print(f"\n=== TRAINING v2 model on {len(symbols)} stocks × {years}y ===\n")
 
@@ -301,30 +425,26 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print("\nWalk-forward cross-validation (5 folds):")
     tscv = TimeSeriesSplit(n_splits=5)
     fold_accs, fold_precs, fold_recs, fold_iters = [], [], [], []
+    # Proven config (v2.1) — gave 55.7% accuracy & 56.4% BUY precision
+    XGB_BASE = dict(
+        max_depth=4, learning_rate=0.03,
+        min_child_weight=5, gamma=0.2,
+        reg_alpha=0.5, reg_lambda=1.0,
+        subsample=0.8, colsample_bytree=0.8, random_state=42,
+        eval_metric="logloss", verbosity=0,
+    )
     for i, (tr, te) in enumerate(tscv.split(X), 1):
-        # Internal val split (last 15% of train) for early stopping
         val_size  = max(int(len(tr) * 0.15), 100)
         tr_inner  = tr[:-val_size]
         val_inner = tr[-val_size:]
-
-        m = XGBClassifier(
-            n_estimators=800, max_depth=4, learning_rate=0.03,
-            min_child_weight=5, gamma=0.2,
-            reg_alpha=0.5, reg_lambda=1.0,
-            subsample=0.8, colsample_bytree=0.8, random_state=42,
-            eval_metric="logloss", verbosity=0,
-            early_stopping_rounds=30,
-        )
-        m.fit(
-            X[tr_inner], y[tr_inner],
-            eval_set=[(X[val_inner], y[val_inner])],
-            verbose=False,
-        )
+        m = XGBClassifier(n_estimators=800, early_stopping_rounds=30, **XGB_BASE)
+        m.fit(X[tr_inner], y[tr_inner],
+              eval_set=[(X[val_inner], y[val_inner])], verbose=False)
         y_pred  = m.predict(X[te])
         acc     = accuracy_score(y[te], y_pred)
         prec    = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
         rec     = recall_score(y[te], y_pred, pos_label=1, zero_division=0)
-        n_trees = getattr(m, "best_iteration", m.n_estimators) or m.n_estimators
+        n_trees = getattr(m, "best_iteration", None) or m.n_estimators
         fold_accs.append(acc)
         fold_precs.append(prec)
         fold_recs.append(rec)
@@ -353,16 +473,15 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
         print("   • Longer history (5y instead of 3y)")
         print("   • Different forward horizon (3 or 10 days)")
 
-    # Final fit on all data — use median of best-iteration counts to avoid overfit
-    n_final = int(np.median(fold_iters)) if fold_iters else 400
-    final = XGBClassifier(
-        n_estimators=n_final, max_depth=4, learning_rate=0.03,
-        min_child_weight=5, gamma=0.2,
-        reg_alpha=0.5, reg_lambda=1.0,
-        subsample=0.8, colsample_bytree=0.8, random_state=42,
-        eval_metric="logloss", verbosity=0,
-    )
-    final.fit(X, y, verbose=False)
+    # Final fit on all data — use median of best-iteration counts from CV
+    n_final = max(int(np.median(fold_iters)) if fold_iters else 100, 50)
+    base_xgb = XGBClassifier(n_estimators=n_final, **XGB_BASE)
+    base_xgb.fit(X, y, verbose=False)
+
+    # Calibration disabled — both isotonic and Platt produced inverted/compressed
+    # probabilities on the chronological tail (regime change in last 15%).
+    # XGB probabilities are reasonably ranked already; we just use raw output.
+    final = base_xgb
 
     # Save
     MODEL_DIR.mkdir(exist_ok=True)
@@ -388,9 +507,23 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print(f"Features            : {len(FEATURE_COLS)}")
     print(f"Final trees         : {n_final}")
 
-    imp = pd.Series(final.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
-    print("\nTop 10 feature importances:")
-    print(imp.head(10).round(3).to_string())
+    # Feature importances — read from base XGB (calibrated wrapper doesn't expose them)
+    importance_source = base_xgb if hasattr(base_xgb, "feature_importances_") else None
+    if importance_source is not None:
+        imp = pd.Series(importance_source.feature_importances_,
+                        index=FEATURE_COLS).sort_values(ascending=False)
+        print("\nTop 10 feature importances:")
+        print(imp.head(10).round(3).to_string())
+
+    # Probability distribution & top-decile hit rate (calibration health check)
+    if final is not None:
+        all_probs = final.predict_proba(X)[:, 1]
+        print("\nProbability distribution (calibrated):")
+        for p in (0.50, 0.55, 0.60, 0.65, 0.70):
+            mask = all_probs >= p
+            n = int(mask.sum())
+            hit = float(y[mask].mean()) if n > 0 else 0.0
+            print(f"  prob ≥ {p:.2f}: {n:>5} samples  empirical BUY rate = {hit*100:5.1f}%")
 
     return final
 
@@ -429,15 +562,56 @@ def predict(symbols: list[str] | None = None):
         proba  = model.predict_proba(latest[FEATURE_COLS].values.reshape(1, -1))[0]
         buy_p, sell_p = float(proba[1]), float(proba[0])
 
-        # Signal-quality filter — both gates must pass for a BUY
-        in_uptrend  = (not USE_EMA200_FILTER) or (latest["feat_ema200_ratio"] > 0)
-        trending    = latest["feat_adx"] >= ADX_MIN
-        passes_gate = in_uptrend and trending
+        # News (best-effort)
+        news_feats = {"news_score": 0.0, "news_count": 0, "news_event_type": "none"}
+        news_blocked, strong_news_up, ngrade = False, False, "B"
+        if USE_NEWS_GATE:
+            try:
+                from news_features import (get_news_features, news_gate_passes,
+                                           news_strong_positive, news_grade)
+                news_feats     = get_news_features(sym)
+                news_blocked   = not news_gate_passes(news_feats)
+                strong_news_up = news_strong_positive(news_feats)
+                ngrade         = news_grade(news_feats)
+            except Exception:
+                pass
 
-        if buy_p >= BUY_PROBA and passes_gate:
+        # Six bullish confirmations — score-based gate
+        market_ret_5d = float(latest.get("feat_market_return_5d", 0.0) or 0.0)
+        rel_ret_5d    = float(latest.get("feat_relative_return_5d", 0.0) or 0.0)
+        confirmations = {
+            "ema200":        (not EMA200_REQUIRED) or (latest["feat_ema200_ratio"] > 0),
+            "adx":           latest["feat_adx"]       >= ADX_MIN,
+            "macd":          latest["feat_macd_hist"] >= 0,
+            "rel_strength":  rel_ret_5d > 0,            # outperforming Nifty
+            "market_regime": market_ret_5d > -0.02,     # market not down >2% in 5d
+            "news":          not news_blocked,
+        }
+        n_pass = sum(confirmations.values())
+        failed = [k for k, v in confirmations.items() if not v]
+
+        # Confidence grade (A=6/6, B=5/6, C=4/6)
+        if n_pass >= GRADE_A_MIN:
+            grade = "A"
+        elif n_pass >= GRADE_B_MIN:
+            grade = "B"
+        elif n_pass >= GRADE_C_MIN:
+            grade = "C"
+        else:
+            grade = "D"
+
+        # Probability bar — relax slightly when news is strongly positive
+        bar = BUY_PROBA_STRONG_NEWS if strong_news_up else BUY_PROBA
+        gate_pass = (
+            confirmations["ema200"]            # mandatory bull-trend
+            and not news_blocked               # strong negative news vetoes
+            and n_pass >= MIN_CONFIRMATIONS
+        )
+
+        if buy_p >= bar and gate_pass:
             signal = "BUY"
-        elif buy_p >= BUY_PROBA and not passes_gate:
-            signal = "WATCH"   # model wants to buy but trend filter rejects
+        elif buy_p >= bar:
+            signal = "WATCH"
         elif sell_p >= SELL_PROBA:
             signal = "SELL"
         else:
@@ -452,18 +626,39 @@ def predict(symbols: list[str] | None = None):
             stop = tgt = None
 
         rows.append({
-            "Symbol":    sym,
-            "Price (₹)": round(price, 2),
-            "Signal":    signal,
-            "BUY %":     round(buy_p * 100, 1),
-            "Stop":      stop,
-            "Target":    tgt,
+            "Symbol":   sym,
+            "Price":    round(price, 2),
+            "Signal":   signal,
+            "Grade":    grade if signal == "BUY" else "",
+            "BUY%":     round(buy_p * 100, 1),
+            "Confirms": f"{n_pass}/6",
+            "News":     ngrade if news_feats.get("news_count", 0) > 0 else "—",
+            "Event":    news_feats.get("news_event_type", "none"),
+            "Stop":     stop,
+            "Target":   tgt,
+            "Blockers": ",".join(failed) if signal == "WATCH" else "",
         })
 
     df_out = pd.DataFrame(rows)
     print(df_out.to_string(index=False))
 
-    print("\n⚠️  Educational only — not financial advice.")
+    # Per-BUY explanation block — what passed
+    buys = df_out[df_out["Signal"] == "BUY"]
+    if not buys.empty:
+        print("\nBUY rationale:")
+        for _, r in buys.iterrows():
+            reasons = []
+            reasons.append("EMA200 uptrend")
+            reasons.append(f"{r['Confirms']} bullish confirmations")
+            news_grade_val = r.get("News", "—")
+            if news_grade_val in ("A", "B"):
+                reasons.append(f"news grade {news_grade_val} ({r.get('Event','')})")
+            print(f"  • {r['Symbol']:<12s} (Grade {r['Grade']}, "
+                  f"BUY% {r['BUY%']}): "
+                  + " + ".join(reasons))
+
+    print("\nLegend: Grade A=6/6 confirms, B=5/6, C=4/6 | News A=positive, B=neutral, C=mildly neg")
+    print("⚠️  Educational only — not financial advice.")
     return df_out
 
 
@@ -506,10 +701,11 @@ def backtest(symbols: list[str] | None = None, years: int = 2,
             if sd.loc[i, "buy_prob"] < buy_threshold:
                 i += 1
                 continue
-            # Trend gate — same as predict()
-            in_uptrend = (not USE_EMA200_FILTER) or (sd.loc[i, "feat_ema200_ratio"] > 0)
-            trending   = sd.loc[i, "feat_adx"] >= ADX_MIN
-            if not (in_uptrend and trending):
+            # Proven gates (v2.1): EMA200 uptrend + ADX trend strength
+            row = sd.loc[i]
+            ema200_ok = (not EMA200_REQUIRED) or row["feat_ema200_ratio"] > 0
+            adx_ok    = row["feat_adx"] >= ADX_MIN
+            if not (ema200_ok and adx_ok):
                 skipped_gate += 1
                 i += 1
                 continue

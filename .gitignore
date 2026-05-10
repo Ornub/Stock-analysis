@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# News cache (refreshed at runtime)
+data/news_cache.json
