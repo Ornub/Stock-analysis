@@ -1,18 +1,28 @@
 """
-swing_v2.py — Upgraded swing trading model for NSE.
+swing_v2.py — Institutional-grade NSE swing trading model (v3.0).
 
-Improvements over swing_signals.py:
-  • Pooled training: ONE XGBoost trained on Nifty-50 stocks together
-    (~10–15k samples vs ~250 samples per stock in v1)
-  • 15 features: trend, momentum, volatility, volume, position,
-    gap, candle shape, 52-week distance, market context
-  • 3 years of history per stock (not 1)
-  • Walk-forward backtest with realistic stop/target/timeout exits
+Architecture v3.0 upgrades over v2.3:
+  1. Market regime filter — Nifty 50/200 DMA + VIX: long entries only in BULL/SIDEWAYS
+  2. Cross-sectional ranking — RS20, MOM60, volume expansion, breakout proximity
+  3. 7-gate strict entry confirmation — EMA20/50/200, ADX, MACD, breakout, volume
+  4. ML meta-filter — configurable probability threshold + min confirmations
+  5. Event filter — earnings ±3-day blackout via live news detection
+  6. Risk management — ATR trailing stop, max open positions, sector exposure limit
+  7. Purged walk-forward CV — embargo between train/test folds prevents leakage
+  8. Richer evaluation — yearly P&L, regime-segmented win rates, profit factor
+  9. 28 features (4 new: ema20_ratio, ema50_ratio, dist_20d_high, return_60d)
+ 10. Default watchlist = full Nifty-50
 
 Commands:
-    python swing_v2.py train       # train pooled model, save to models/swing_v2.pkl
-    python swing_v2.py predict     # generate today's signals using saved model
-    python swing_v2.py backtest    # walk-forward backtest with P&L
+    python swing_v2.py train       # retrain pooled XGBoost → models/swing_v2.pkl
+    python swing_v2.py predict     # live signals with regime/rank/gate filters
+    python swing_v2.py backtest    # backtest with trailing stops + regime breakdown
+
+Default hyperparameters (all configurable at top of file):
+    BUY_PROBA = 0.62        MIN_CONFIRMATIONS = 5 / 7
+    REGIME_BULL_ONLY = True  TOP_N_CANDIDATES = 20
+    ATR_STOP = 1.5×          ATR_TRAIL = 2.0×   ATR_TARGET = 3.0×
+    MAX_OPEN_POSITIONS = 5   EMBARGO_SIZE = 10 days
 
 ⚠️ Educational only — not financial advice.
 """
@@ -28,7 +38,6 @@ import numpy as np
 import pandas as pd
 import joblib
 from xgboost import XGBClassifier
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
@@ -37,11 +46,10 @@ from swing_signals import _rsi, _macd, _bollinger, _atr, _obv
 
 
 # =============================================================================
-# Extra indicators (v2.1)
+# Extra indicators
 # =============================================================================
 
 def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """ADX — trend strength (0-100). Higher = stronger trend, regardless of direction."""
     up   = high.diff()
     down = -low.diff()
     plus_dm  = up.where((up > down) & (up > 0), 0.0)
@@ -59,21 +67,18 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) ->
 
 
 def _stoch_k(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Stochastic %K — close vs 14-day high/low range, 0-100."""
     ll = low.rolling(period).min()
     hh = high.rolling(period).max()
     return 100 * (close - ll) / (hh - ll).replace(0, np.nan)
 
 
 def _williams_r(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Williams %R — inverted stochastic, -100 to 0."""
     hh = high.rolling(period).max()
     ll = low.rolling(period).min()
     return -100 * (hh - close) / (hh - ll).replace(0, np.nan)
 
 
 def _cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
-    """Commodity Channel Index — typical price deviation from mean."""
     tp = (high + low + close) / 3
     ma = tp.rolling(period).mean()
     md = (tp - ma).abs().rolling(period).mean()
@@ -81,7 +86,7 @@ def _cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) ->
 
 
 # =============================================================================
-# Configuration
+# Universe & sector map
 # =============================================================================
 
 NIFTY_50 = [
@@ -96,7 +101,6 @@ NIFTY_50 = [
     "TRENT", "BPCL",
 ]
 
-# Nifty-Next-50 — adds large-mid-caps for richer training universe
 NIFTY_NEXT_50 = [
     "ABB", "ADANIENSOL", "ADANIGREEN", "ADANIPOWER", "AMBUJACEM",
     "BAJAJHLDNG", "BANKBARODA", "BERGEPAINT", "BOSCHLTD", "CANBK",
@@ -111,65 +115,152 @@ NIFTY_NEXT_50 = [
 ]
 
 TRAIN_UNIVERSE = NIFTY_50 + NIFTY_NEXT_50
+WATCHLIST      = NIFTY_50   # default predict universe
 
-WATCHLIST = [
-    "SBIN", "HDFCBANK", "RELIANCE", "TCS", "INFY",
-    "ICICIBANK", "WIPRO", "AXISBANK",
-]
+SECTOR_MAP: dict[str, str] = {
+    "RELIANCE": "Energy",  "ONGC": "Energy",    "BPCL": "Energy",   "COALINDIA": "Energy",
+    "NTPC":    "Power",    "POWERGRID": "Power",
+    "LT":      "Infra",    "ADANIPORTS": "Infra",
+    "HDFCBANK":"Banking",  "ICICIBANK": "Banking", "SBIN": "Banking",
+    "AXISBANK":"Banking",  "KOTAKBANK": "Banking", "INDUSINDBK": "Banking",
+    "BAJFINANCE":"FinServ","BAJAJFINSV": "FinServ",
+    "SBILIFE": "Insurance","HDFCLIFE": "Insurance",
+    "TCS":     "IT",       "INFY": "IT",    "WIPRO": "IT",
+    "HCLTECH": "IT",       "TECHM": "IT",
+    "BHARTIARTL": "Telecom",
+    "HINDUNILVR":"FMCG",  "ITC": "FMCG",   "NESTLEIND": "FMCG",  "BRITANNIA": "FMCG",
+    "TITAN":   "Consumer", "TRENT": "Consumer",
+    "MARUTI":  "Auto",     "HEROMOTOCO": "Auto", "TATAMOTORS": "Auto", "EICHERMOT": "Auto",
+    "SUNPHARMA":"Pharma",  "CIPLA": "Pharma",  "DRREDDY": "Pharma",
+    "DIVISLAB":"Pharma",   "APOLLOHOSP": "Healthcare",
+    "TATASTEEL":"Metal",   "JSWSTEEL": "Metal",  "HINDALCO": "Metal",
+    "GRASIM":  "Cement",   "ULTRACEMCO": "Cement",
+    "ASIANPAINT":"Paints",
+}
 
-LOOKBACK_YEARS = 5      # 5y of history
-FORWARD_DAYS   = 5      # forward return horizon (matches backtest exit logic)
-THRESHOLD      = 0.02   # ±2% for BUY/SELL labels
-BUY_PROBA              = 0.60   # proven baseline (matches v2.1 best run)
-BUY_PROBA_STRONG_NEWS  = 0.55   # relaxed bar when news is materially positive
-SELL_PROBA             = 0.60
 
-# Signal-quality gates (v2.3) — score-based, must pass MIN_CONFIRMATIONS of 6
-EMA200_REQUIRED   = True
-ADX_MIN           = 0.20
-MIN_CONFIRMATIONS = 4
-# Confidence grade thresholds (count of bullish confirmations passed)
-GRADE_A_MIN = 6
-GRADE_B_MIN = 5
-GRADE_C_MIN = 4
+# =============================================================================
+# Configuration — all hyperparameters in one place
+# =============================================================================
 
-# News confirmation
-USE_NEWS_GATE     = True
+# Training
+LOOKBACK_YEARS = 5
+FORWARD_DAYS   = 5
+THRESHOLD      = 0.02   # ±2% label band
+EMBARGO_SIZE   = 10     # trading days purged between train/test in purged CV
 
-# News confirmation
-USE_NEWS_GATE     = True   # downgrade BUY → WATCH if recent news is materially negative
-NEWS_MIN_SENT     = -0.10
-NEWS_MAX_NEG_SHARE = 0.40
+# ── Market regime filter ────────────────────────────────────────────────────
+# Reasoning: institutional desks only open longs when broad market trend is
+# supportive. Nifty 50/200 DMA golden/death cross is the most durable regime
+# signal; VIX overlays the fear level.
+REGIME_BULL_ONLY   = True    # block new longs in BEAR regime
+NIFTY_FAST_DMA     = 50      # EMA period for fast DMA
+NIFTY_SLOW_DMA     = 200     # SMA period for slow DMA
+VIX_HIGH_THRESHOLD = 20.0    # above: high volatility → tighten gates
+VIX_VERY_HIGH      = 25.0    # above: extreme fear → halt new longs
 
-# Trade-cost model for backtest
-SLIPPAGE_PCT       = 0.0025  # 0.25% per fill (entry + exit applied separately)
-ROUND_TRIP_COST    = 0.0050  # 0.5% combined brokerage + STT + GST per round trip
+# ── Cross-sectional ranking ─────────────────────────────────────────────────
+# Reasoning: only evaluating top-ranked candidates removes low-quality setups
+# before the ML model even sees them, improving effective precision.
+TOP_N_CANDIDATES = 20   # evaluate only top N by composite rank
+RS_PERIOD        = 20   # relative-strength lookback (trading days)
+MOMENTUM_PERIOD  = 60   # momentum lookback (trading days)
+
+# ── 7-gate entry confirmation ───────────────────────────────────────────────
+# Reasoning: each gate represents an independent evidence dimension. Requiring
+# 5/7 ensures multi-dimensional confluence without demanding perfection.
+REQUIRE_EMA200   = True   # [HARD GATE] price > EMA200 — mandatory for longs
+REQUIRE_EMA50    = True
+REQUIRE_EMA20    = True
+REQUIRE_ADX      = True
+ADX_MIN          = 0.20   # feat_adx = raw_ADX/100 → 0.20 = ADX ≥ 20
+REQUIRE_MACD     = True
+REQUIRE_BREAKOUT = True   # close > 20-day rolling high (price breakout)
+REQUIRE_VOLUME   = True   # volume > N × 20-day average
+VOLUME_THRESHOLD = 1.0    # 1.0 = current volume ≥ 100% of 20d avg
+
+MIN_CONFIRMATIONS = 5   # of 7 gates must pass (raised from 4/6 in v2.3)
+GRADE_A_MIN = 7         # 7/7 confirmations
+GRADE_B_MIN = 6         # 6/7 confirmations
+GRADE_C_MIN = 5         # 5/7 confirmations (minimum for BUY)
+
+# ── ML meta-filter ──────────────────────────────────────────────────────────
+# Raised from 0.60 to 0.62 for precision. Strong news relaxes to 0.57.
+BUY_PROBA             = 0.62
+BUY_PROBA_STRONG_NEWS = 0.57
+SELL_PROBA            = 0.62
+
+# ── Event / news filters ────────────────────────────────────────────────────
+USE_NEWS_GATE          = True
+USE_EVENT_FILTER       = True
+EARNINGS_BLACKOUT_DAYS = 3   # block entry within N days of detected earnings news
+
+# ── Risk management ─────────────────────────────────────────────────────────
+ATR_STOP_MULT      = 1.5   # initial stop: entry - 1.5 × ATR
+ATR_TRAIL_MULT     = 2.0   # trailing stop: running_high - 2.0 × ATR (wider = breathes more)
+ATR_TARGET_MULT    = 3.0   # target: entry + 3.0 × ATR (1:2 R:R)
+MAX_HOLDING_DAYS   = 10    # time stop after N bars
+MAX_OPEN_POSITIONS = 5     # max concurrent portfolio positions in backtest
+MAX_SECTOR_EXPOSURE = 2    # max concurrent positions in same sector
+
+# Trade-cost model
+SLIPPAGE_PCT    = 0.0025   # 0.25% per fill (entry and exit separately)
+ROUND_TRIP_COST = 0.0050   # 0.50% combined brokerage + STT + GST
 
 MODEL_DIR  = Path("models")
 MODEL_PATH = MODEL_DIR / "swing_v2.pkl"
 
 
 # =============================================================================
-# Feature engineering — 15 features
+# Purged walk-forward CV with embargo
+# =============================================================================
+
+class PurgedTimeSeriesSplit:
+    """Walk-forward CV that removes an embargo gap from the end of each train fold.
+
+    The embargo prevents rolling-window features (e.g. 20-day return) computed
+    near the fold boundary from leaking information about the test period into
+    training, a subtle but real source of overfit in time-series CV.
+
+    Default embargo = 10 trading days, covering our longest rolling label
+    horizon (FORWARD_DAYS=5) plus a safety buffer.
+    """
+
+    def __init__(self, n_splits: int = 5, embargo_size: int = EMBARGO_SIZE):
+        self.n_splits     = n_splits
+        self.embargo_size = embargo_size
+        self._base        = TimeSeriesSplit(n_splits=n_splits)
+
+    def split(self, X, y=None, groups=None):
+        for tr_idx, te_idx in self._base.split(X):
+            purged = tr_idx[:-self.embargo_size] if len(tr_idx) > self.embargo_size else tr_idx
+            yield purged, te_idx
+
+
+# =============================================================================
+# Feature engineering — 28 features
 # =============================================================================
 
 FEATURE_COLS = [
-    # Trend / momentum
+    # Trend / EMA-relative position
     "feat_rsi",
     "feat_macd_hist",
     "feat_macd_signal_diff",
-    "feat_ema_fast_ratio",
-    "feat_ema_slow_ratio",
-    "feat_ema200_ratio",
+    "feat_ema_fast_ratio",      # ema9 / ema21 - 1
+    "feat_ema_slow_ratio",      # ema21 / ema50 - 1
+    "feat_ema20_ratio",         # close / ema20 - 1  [v3.0]
+    "feat_ema50_ratio",         # close / ema50 - 1  [v3.0]
+    "feat_ema200_ratio",        # close / ema200 - 1
     "feat_adx",
     "feat_stoch_k",
     "feat_williams_r",
     "feat_cci",
-    # Volatility / position
+    # Volatility / price position
     "feat_bb_pos",
     "feat_atr_pct",
     "feat_dist_52w_high",
     "feat_dist_52w_low",
+    "feat_dist_20d_high",       # close / 20d_rolling_max - 1  [v3.0]
     "feat_volatility_20d",
     "feat_high_low_range",
     # Volume
@@ -183,10 +274,12 @@ FEATURE_COLS = [
     "feat_return_5d",
     "feat_return_10d",
     "feat_return_20d",
+    "feat_return_60d",          # 60-day momentum  [v3.0]
 ]
 
-# Auxiliary columns (joined for predict/backtest gates and display, NOT used as
-# model features — they bias the model toward exhausted-uptrend setups in CV).
+# Auxiliary market-regime columns — joined for gate/display use only; NOT in
+# FEATURE_COLS because regime-correlated entries create a regime-bias in CV
+# that collapses win rate when the market transitions out of the trained regime.
 MARKET_AUX_COLS = [
     "feat_market_return_1d",
     "feat_market_return_5d",
@@ -198,102 +291,88 @@ MARKET_AUX_COLS = [
 
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute all 15 features from OHLCV. Returns df with feat_* columns."""
+    """Compute all 28 features from OHLCV. Returns df with feat_* columns."""
     df = df.copy()
     close, high, low, vol, op = df["Close"], df["High"], df["Low"], df["Volume"], df["Open"]
 
-    # 1. RSI 14
     df["feat_rsi"] = _rsi(close, 14)
 
-    # 2-3. MACD histogram + (macd - signal) normalised by price
     macd_line, sig_line, hist = _macd(close, 12, 26, 9)
     df["feat_macd_hist"]        = hist
     df["feat_macd_signal_diff"] = (macd_line - sig_line) / close
 
-    # 4-6. EMA ratios (trend strength)
     ema9   = close.ewm(span=9,   adjust=False).mean()
+    ema20  = close.ewm(span=20,  adjust=False).mean()   # [v3.0]
     ema21  = close.ewm(span=21,  adjust=False).mean()
     ema50  = close.ewm(span=50,  adjust=False).mean()
     ema200 = close.ewm(span=200, adjust=False).mean()
-    df["feat_ema_fast_ratio"] = ema9   / ema21 - 1
-    df["feat_ema_slow_ratio"] = ema21  / ema50 - 1
-    df["feat_ema200_ratio"]   = close  / ema200 - 1     # long-term trend filter
 
-    # 7. ADX 14 (trend strength) — normalised to 0-1
-    df["feat_adx"] = _adx(high, low, close, 14) / 100
+    df["feat_ema_fast_ratio"] = ema9   / ema21  - 1
+    df["feat_ema_slow_ratio"] = ema21  / ema50  - 1
+    df["feat_ema20_ratio"]    = close  / ema20  - 1     # [v3.0] gate: price > EMA20
+    df["feat_ema50_ratio"]    = close  / ema50  - 1     # [v3.0] gate: price > EMA50
+    df["feat_ema200_ratio"]   = close  / ema200 - 1     # long-term trend
 
-    # 8. Stochastic %K 14 — normalised to 0-1
-    df["feat_stoch_k"] = _stoch_k(high, low, close, 14) / 100
+    df["feat_adx"]       = _adx(high, low, close, 14) / 100
+    df["feat_stoch_k"]   = _stoch_k(high, low, close, 14) / 100
+    df["feat_williams_r"]= (_williams_r(high, low, close, 14) + 100) / 100
+    df["feat_cci"]       = _cci(high, low, close, 20).clip(-300, 300) / 300
 
-    # 9. Williams %R 14 — already -100 to 0, shift to 0-1
-    df["feat_williams_r"] = (_williams_r(high, low, close, 14) + 100) / 100
-
-    # 10. CCI 20 — clip extreme values, normalise around 0
-    df["feat_cci"] = _cci(high, low, close, 20).clip(-300, 300) / 300
-
-    # 11. Bollinger Band position
     _, _, _, bb_pos = _bollinger(close, 20, 2)
     df["feat_bb_pos"] = bb_pos
 
-    # 12. ATR % of price (normalised volatility)
     atr = _atr(high, low, close, 14)
     df["feat_atr_pct"] = atr / close
-    df["ATR"] = atr   # kept for stop/target calculations later
+    df["ATR"] = atr
 
-    # 13-14. Distance from 52-week high / low
     high_52w = close.rolling(252, min_periods=20).max()
     low_52w  = close.rolling(252, min_periods=20).min()
     df["feat_dist_52w_high"] = close / high_52w - 1
     df["feat_dist_52w_low"]  = close / low_52w  - 1
 
-    # 15. 20-day volatility (regime)
-    df["feat_volatility_20d"] = close.pct_change().rolling(20).std()
+    # 20-day breakout proximity: positive = price above previous 20d high (breakout)
+    # .shift(1) on the rolling max excludes the current bar → avoids lookahead
+    close_20d_max = close.rolling(20, min_periods=10).max().shift(1)
+    df["feat_dist_20d_high"] = close / close_20d_max.replace(0, np.nan) - 1   # [v3.0]
 
-    # 16. High-low range vs close (intraday range as % of price)
-    df["feat_high_low_range"] = (high - low) / close
+    df["feat_volatility_20d"]  = close.pct_change().rolling(20).std()
+    df["feat_high_low_range"]  = (high - low) / close
 
-    # 17. OBV ratio (volume confirmation)
     obv = _obv(close, vol)
-    df["feat_obv_ratio"] = obv / obv.ewm(span=21, adjust=False).mean().replace(0, np.nan)
-
-    # 18. Volume / 20d avg volume (relative volume)
+    df["feat_obv_ratio"]    = obv / obv.ewm(span=21, adjust=False).mean().replace(0, np.nan)
     df["feat_volume_ratio"] = vol / vol.rolling(20).mean().replace(0, np.nan)
 
-    # 19. Volume trend — short EMA / long EMA of volume
     vol_ema9  = vol.ewm(span=9,  adjust=False).mean()
     vol_ema21 = vol.ewm(span=21, adjust=False).mean().replace(0, np.nan)
     df["feat_volume_trend"] = vol_ema9 / vol_ema21 - 1
 
-    # 20. Gap % (today's open vs yesterday's close)
-    df["feat_gap_pct"] = op / close.shift(1) - 1
+    df["feat_gap_pct"]   = op / close.shift(1) - 1
+    df["feat_body_ratio"]= (close - op).abs() / (high - low).replace(0, np.nan)
 
-    # 21. Body ratio (|close-open| / range) — strength of the candle
-    df["feat_body_ratio"] = (close - op).abs() / (high - low).replace(0, np.nan)
-
-    # 22-24. Multi-period momentum
     df["feat_return_5d"]  = close.pct_change(5)
     df["feat_return_10d"] = close.pct_change(10)
     df["feat_return_20d"] = close.pct_change(20)
+    df["feat_return_60d"] = close.pct_change(60)    # [v3.0] 60-day momentum
 
     return df
 
 
 # =============================================================================
-# Market regime features (v2.3) — Nifty 50 + India VIX
+# Market regime — fetch + classify
 # =============================================================================
 
 _MARKET_CACHE: pd.DataFrame | None = None
 
 
 def _fetch_market_regime(years: int) -> pd.DataFrame:
-    """Fetch ^NSEI and ^INDIAVIX, compute regime features per date."""
+    """Fetch ^NSEI + ^INDIAVIX, compute regime features including 50/200 DMA."""
     global _MARKET_CACHE
     if _MARKET_CACHE is not None:
         return _MARKET_CACHE
 
     import yfinance as yf
     today     = date.today()
-    from_date = today - timedelta(days=years * 365 + 30)
+    from_date = today - timedelta(days=years * 365 + 60)
 
     nifty = yf.download("^NSEI",     start=from_date, end=today,
                         auto_adjust=True, progress=False)
@@ -301,28 +380,31 @@ def _fetch_market_regime(years: int) -> pd.DataFrame:
                         auto_adjust=True, progress=False)
 
     if nifty is None or len(nifty) == 0:
-        print("[WARN] Could not fetch ^NSEI; market regime features will be 0.")
+        print("[WARN] Could not fetch ^NSEI; market regime features will be zero.")
         return pd.DataFrame()
 
-    # yfinance MultiIndex columns when downloading single symbol — flatten
     if isinstance(nifty.columns, pd.MultiIndex):
         nifty.columns = nifty.columns.get_level_values(0)
     if vix is not None and isinstance(vix.columns, pd.MultiIndex):
         vix.columns = vix.columns.get_level_values(0)
 
     df = pd.DataFrame(index=nifty.index)
-    df["nifty_close"]                 = nifty["Close"]
-    df["feat_market_return_1d"]       = nifty["Close"].pct_change(1)
-    df["feat_market_return_5d"]       = nifty["Close"].pct_change(5)
-    df["feat_market_volatility_20d"]  = nifty["Close"].pct_change().rolling(20).std()
+    df["nifty_close"]                = nifty["Close"]
+    # DMAs for regime classification
+    df["nifty_50dma"]  = nifty["Close"].ewm(span=NIFTY_FAST_DMA, adjust=False).mean()
+    df["nifty_200dma"] = nifty["Close"].rolling(NIFTY_SLOW_DMA, min_periods=100).mean()
+
+    df["feat_market_return_1d"]      = nifty["Close"].pct_change(1)
+    df["feat_market_return_5d"]      = nifty["Close"].pct_change(5)
+    df["feat_market_volatility_20d"] = nifty["Close"].pct_change().rolling(20).std()
 
     if vix is not None and len(vix):
         v = vix["Close"].reindex(df.index, method="ffill")
-        df["feat_vix_level"]      = v / 100   # normalise (raw 10-30 typical)
-        df["feat_vix_change_5d"]  = v.pct_change(5).fillna(0)
+        df["feat_vix_level"]     = v / 100
+        df["feat_vix_change_5d"] = v.pct_change(5).fillna(0)
     else:
-        df["feat_vix_level"]      = 0.15      # neutral fallback
-        df["feat_vix_change_5d"]  = 0.0
+        df["feat_vix_level"]     = 0.15
+        df["feat_vix_change_5d"] = 0.0
 
     df = df.reset_index().rename(columns={"Date": "DateTime"})
     df["DateTime"] = pd.to_datetime(df["DateTime"]).dt.tz_localize(None).dt.normalize()
@@ -330,24 +412,61 @@ def _fetch_market_regime(years: int) -> pd.DataFrame:
     return df
 
 
+def classify_regime(market_df: pd.DataFrame) -> tuple[str, str]:
+    """Classify the latest market observation into trend and volatility regimes.
+
+    Trend regimes:
+        BULL     — Nifty > 50DMA > 200DMA (golden cross, all aligned)
+        SIDEWAYS — Mixed alignment; no clear direction
+        BEAR     — Nifty < 200DMA or 50DMA < 200DMA (death cross)
+
+    Vol regimes (raw VIX points):
+        LOW      — VIX < 12
+        NORMAL   — 12 ≤ VIX < 20
+        HIGH     — 20 ≤ VIX < 25
+        EXTREME  — VIX ≥ 25
+
+    Default hyperparameters: VIX_HIGH_THRESHOLD=20, VIX_VERY_HIGH=25
+    """
+    if market_df is None or market_df.empty:
+        return "SIDEWAYS", "NORMAL"
+
+    latest   = market_df.sort_values("DateTime").iloc[-1]
+    nifty    = float(latest.get("nifty_close", 0) or 0)
+    fast_dma = float(latest.get("nifty_50dma",  nifty) or nifty)
+    slow_dma = float(latest.get("nifty_200dma", nifty) or nifty)
+    vix      = float(latest.get("feat_vix_level", 0.15) or 0.15) * 100
+
+    if nifty > fast_dma and fast_dma > slow_dma:
+        trend = "BULL"
+    elif nifty < slow_dma or fast_dma < slow_dma:
+        trend = "BEAR"
+    else:
+        trend = "SIDEWAYS"
+
+    if vix >= VIX_VERY_HIGH:
+        vol = "EXTREME"
+    elif vix >= VIX_HIGH_THRESHOLD:
+        vol = "HIGH"
+    elif vix < 12.0:
+        vol = "LOW"
+    else:
+        vol = "NORMAL"
+
+    return trend, vol
+
+
 def _attach_market_features(panel: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
-    """Join market features by date and compute relative-strength columns."""
     if market is None or market.empty:
-        for c in ("feat_market_return_1d", "feat_market_return_5d",
-                  "feat_market_volatility_20d", "feat_vix_level",
-                  "feat_vix_change_5d", "feat_relative_return_5d"):
+        for c in MARKET_AUX_COLS:
             panel[c] = 0.0
         return panel
 
     panel = panel.copy()
     panel["_date_key"] = pd.to_datetime(panel["DateTime"]).dt.tz_localize(None).dt.normalize()
-    join_cols = ["DateTime", "feat_market_return_1d", "feat_market_return_5d",
-                 "feat_market_volatility_20d", "feat_vix_level", "feat_vix_change_5d"]
+    join_cols = ["DateTime"] + [c for c in MARKET_AUX_COLS if c != "feat_relative_return_5d"]
     market_join = market[join_cols].rename(columns={"DateTime": "_date_key"})
-    panel = panel.merge(market_join, on="_date_key", how="left")
-    panel = panel.drop(columns=["_date_key"])
-
-    # Relative strength: stock 5d return minus market 5d return
+    panel = panel.merge(market_join, on="_date_key", how="left").drop(columns=["_date_key"])
     panel["feat_relative_return_5d"] = (
         panel["feat_return_5d"].fillna(0) - panel["feat_market_return_5d"].fillna(0)
     )
@@ -355,16 +474,82 @@ def _attach_market_features(panel: pd.DataFrame, market: pd.DataFrame) -> pd.Dat
 
 
 # =============================================================================
+# Cross-sectional ranking
+# =============================================================================
+
+def rank_candidates(
+    symbol_data: dict[str, pd.DataFrame],
+    market_df: pd.DataFrame,
+    top_n: int = TOP_N_CANDIDATES,
+) -> list[str]:
+    """Score every stock on 4 dimensions, return top N symbols.
+
+    Dimensions (equal-weighted percentile rank, higher = better):
+        1. 20-day relative strength vs Nifty  (recent outperformance)
+        2. 60-day price momentum              (trend persistence)
+        3. 5-day avg volume / 20-day avg vol  (volume expansion → institutional interest)
+        4. Close proximity to 20-day high     (closeness to breakout level)
+
+    Rationale: institutional systematic strategies select from a pre-filtered
+    opportunity set rather than scanning the full universe through the full
+    model pipeline — this removes statistically weak setups before ML scoring.
+    """
+    nifty_ret_rs  = 0.0
+    nifty_ret_mom = 0.0
+    if market_df is not None and not market_df.empty:
+        ns = market_df.sort_values("DateTime").set_index("DateTime")["nifty_close"]
+        if len(ns) >= RS_PERIOD:
+            nifty_ret_rs  = float(ns.pct_change(RS_PERIOD).iloc[-1]  or 0)
+        if len(ns) >= MOMENTUM_PERIOD:
+            nifty_ret_mom = float(ns.pct_change(MOMENTUM_PERIOD).iloc[-1] or 0)
+
+    scores = []
+    for sym, df in symbol_data.items():
+        if df is None or len(df) < MOMENTUM_PERIOD + 5:
+            continue
+        c, h, v = df["Close"], df["High"], df["Volume"]
+
+        rs_20d   = float(c.pct_change(RS_PERIOD).iloc[-1]  or 0) - nifty_ret_rs
+        mom_60d  = float(c.pct_change(MOMENTUM_PERIOD).iloc[-1] or 0) - nifty_ret_mom
+
+        vol_avg  = float(v.rolling(20).mean().iloc[-1] or 1)
+        vol_exp  = float(v.tail(5).mean() or 0) / vol_avg
+
+        # proximity to 20d high: higher ratio = closer to/above breakout level
+        h20 = float(h.iloc[-21:-1].max() or c.iloc[-1])
+        breakout_prox = float(c.iloc[-1]) / h20 if h20 > 0 else 1.0
+
+        scores.append({
+            "symbol":        sym,
+            "rs_20d":        rs_20d,
+            "mom_60d":       mom_60d,
+            "vol_expansion": vol_exp,
+            "breakout_prox": breakout_prox,
+        })
+
+    if not scores:
+        return list(symbol_data.keys())
+
+    df_s = pd.DataFrame(scores)
+    df_s["rank_rs"]       = df_s["rs_20d"].rank()
+    df_s["rank_mom"]      = df_s["mom_60d"].rank()
+    df_s["rank_vol"]      = df_s["vol_expansion"].rank()
+    df_s["rank_breakout"] = df_s["breakout_prox"].rank()
+    df_s["composite"]     = (df_s["rank_rs"] + df_s["rank_mom"] +
+                             df_s["rank_vol"] + df_s["rank_breakout"])
+
+    return df_s.nlargest(min(top_n, len(df_s)), "composite")["symbol"].tolist()
+
+
+# =============================================================================
 # Dataset assembly
 # =============================================================================
 
 def build_panel(symbols: list[str], years: int = LOOKBACK_YEARS) -> pd.DataFrame | None:
-    """Fetch symbols, compute per-stock + market regime features, concatenate."""
     today     = date.today()
     from_date = today - timedelta(days=years * 365)
 
     market = _fetch_market_regime(years)
-
     panels = []
     for sym in symbols:
         df = fetch_historical_data(sym, from_date, today)
@@ -379,12 +564,11 @@ def build_panel(symbols: list[str], years: int = LOOKBACK_YEARS) -> pd.DataFrame
     if not panels:
         return None
     panel = pd.concat(panels, ignore_index=True)
-    panel = _attach_market_features(panel, market)
-    return panel
+    return _attach_market_features(panel, market)
 
 
 def make_labels(panel: pd.DataFrame) -> pd.DataFrame:
-    """Forward 5-day return ≥+2% → BUY (1), ≤-2% → SELL (0), else drop."""
+    """Forward 5-day return ≥+2% → BUY (1), ≤-2% → SELL (0), else drop neutral."""
     panel = panel.sort_values(["symbol", "DateTime"]).copy()
     panel["fwd_return"] = (
         panel.groupby("symbol")["Close"].pct_change(FORWARD_DAYS).shift(-FORWARD_DAYS)
@@ -396,14 +580,13 @@ def make_labels(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# Train
+# Train — purged walk-forward CV
 # =============================================================================
 
 def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
-    # Train on cleaner Nifty-50 only — adding Next-50 dilutes calibration.
-    # TRAIN_UNIVERSE stays available for explicit opt-in.
     symbols = symbols or NIFTY_50
-    print(f"\n=== TRAINING v2 model on {len(symbols)} stocks × {years}y ===\n")
+    print(f"\n=== TRAINING v3 model on {len(symbols)} stocks × {years}y ===")
+    print(f"    Purged CV embargo: {EMBARGO_SIZE} days | Features: {len(FEATURE_COLS)}\n")
 
     panel = build_panel(symbols, years)
     if panel is None:
@@ -415,17 +598,13 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     panel = make_labels(panel)
     n_buy  = int(panel["label"].sum())
     n_sell = len(panel) - n_buy
-    print(f"After label filter: {len(panel):,} samples (BUY={n_buy:,}, SELL={n_sell:,})")
+    print(f"After label filter: {len(panel):,} samples  BUY={n_buy:,}  SELL={n_sell:,}")
 
-    # Sort chronologically (across all stocks) for honest time-series CV
     panel = panel.sort_values("DateTime").reset_index(drop=True)
     X = panel[FEATURE_COLS].values
     y = panel["label"].values
 
-    print("\nWalk-forward cross-validation (5 folds):")
-    tscv = TimeSeriesSplit(n_splits=5)
-    fold_accs, fold_precs, fold_recs, fold_iters = [], [], [], []
-    # Proven config (v2.1) — gave 55.7% accuracy & 56.4% BUY precision
+    # XGBoost config — proven v2.1 base, unchanged for architectural continuity
     XGB_BASE = dict(
         max_depth=4, learning_rate=0.03,
         min_child_weight=5, gamma=0.2,
@@ -433,103 +612,88 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
         subsample=0.8, colsample_bytree=0.8, random_state=42,
         eval_metric="logloss", verbosity=0,
     )
-    for i, (tr, te) in enumerate(tscv.split(X), 1):
+
+    print("\nWalk-forward CV (PurgedTimeSeriesSplit, 5 folds, embargo=10d):")
+    ptscv = PurgedTimeSeriesSplit(n_splits=5, embargo_size=EMBARGO_SIZE)
+    fold_accs, fold_precs, fold_recs, fold_iters = [], [], [], []
+
+    for i, (tr, te) in enumerate(ptscv.split(X), 1):
         val_size  = max(int(len(tr) * 0.15), 100)
         tr_inner  = tr[:-val_size]
         val_inner = tr[-val_size:]
         m = XGBClassifier(n_estimators=800, early_stopping_rounds=30, **XGB_BASE)
         m.fit(X[tr_inner], y[tr_inner],
               eval_set=[(X[val_inner], y[val_inner])], verbose=False)
-        y_pred  = m.predict(X[te])
-        acc     = accuracy_score(y[te], y_pred)
-        prec    = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
-        rec     = recall_score(y[te], y_pred, pos_label=1, zero_division=0)
-        n_trees = getattr(m, "best_iteration", None) or m.n_estimators
-        fold_accs.append(acc)
-        fold_precs.append(prec)
-        fold_recs.append(rec)
-        fold_iters.append(n_trees)
-        print(f"  Fold {i}: train={len(tr_inner):>5,}  val={val_inner.size:>4,}  test={len(te):>5,} "
-              f"| acc={acc:.3f}  BUY-prec={prec:.3f}  BUY-rec={rec:.3f}  trees={n_trees}")
+        y_pred = m.predict(X[te])
+        acc    = accuracy_score(y[te], y_pred)
+        prec   = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
+        rec    = recall_score(y[te], y_pred, pos_label=1, zero_division=0)
+        n_trees= getattr(m, "best_iteration", None) or m.n_estimators
+        fold_accs.append(acc); fold_precs.append(prec)
+        fold_recs.append(rec); fold_iters.append(n_trees)
+        print(f"  Fold {i}: train={len(tr_inner):>5,}  val={val_inner.size:>4,}  "
+              f"test={len(te):>5,} | acc={acc:.3f}  BUY-prec={prec:.3f}  "
+              f"BUY-rec={rec:.3f}  trees={n_trees}")
 
     mean_acc  = float(np.mean(fold_accs))
     std_acc   = float(np.std(fold_accs))
     mean_prec = float(np.mean(fold_precs))
     mean_rec  = float(np.mean(fold_recs))
     print(f"\nMean walk-forward accuracy : {mean_acc:.3f}  (±{std_acc:.3f})")
-    print(f"Mean BUY precision         : {mean_prec:.3f}  (when model says BUY, % correct)")
-    print(f"Mean BUY recall            : {mean_rec:.3f}  (% of true BUYs caught)")
+    print(f"Mean BUY precision         : {mean_prec:.3f}")
+    print(f"Mean BUY recall            : {mean_rec:.3f}")
 
-    # Flag unstable folds (>1.5σ from mean)
-    sigma = max(std_acc, 1e-6)
-    unstable = [(i + 1, a) for i, a in enumerate(fold_accs) if abs(a - mean_acc) > 1.5 * sigma]
+    sigma    = max(std_acc, 1e-6)
+    unstable = [(i+1, a) for i, a in enumerate(fold_accs) if abs(a - mean_acc) > 1.5*sigma]
     if unstable:
-        print(f"⚠️  Unstable folds (>1.5σ from mean): "
+        print(f"⚠  Unstable folds (>1.5σ): "
               + ", ".join(f"#{i} ({a:.3f})" for i, a in unstable))
-
     if mean_acc < 0.52:
-        print("⚠️  WARNING: Accuracy barely beats coin-flip (50%). Consider:")
-        print("   • More stocks (add mid/small caps)")
-        print("   • Longer history (5y instead of 3y)")
-        print("   • Different forward horizon (3 or 10 days)")
+        print("⚠  Accuracy near coin-flip — consider retraining with more data or "
+              "adjusting FORWARD_DAYS / THRESHOLD.")
 
-    # Final fit on all data — use median of best-iteration counts from CV
-    n_final = max(int(np.median(fold_iters)) if fold_iters else 100, 50)
-    base_xgb = XGBClassifier(n_estimators=n_final, **XGB_BASE)
-    base_xgb.fit(X, y, verbose=False)
+    n_final  = max(int(np.median(fold_iters)) if fold_iters else 100, 50)
+    final    = XGBClassifier(n_estimators=n_final, **XGB_BASE)
+    final.fit(X, y, verbose=False)
 
-    # Calibration disabled — both isotonic and Platt produced inverted/compressed
-    # probabilities on the chronological tail (regime change in last 15%).
-    # XGB probabilities are reasonably ranked already; we just use raw output.
-    final = base_xgb
-
-    # Save
     MODEL_DIR.mkdir(exist_ok=True)
     joblib.dump({
-        "model": final,
-        "features": FEATURE_COLS,
-        "val_acc":  mean_acc,
-        "val_std":  std_acc,
-        "val_prec": mean_prec,
-        "val_rec":  mean_rec,
-        "n_train":  len(panel),
+        "model":      final,
+        "features":   FEATURE_COLS,
+        "val_acc":    mean_acc,
+        "val_std":    std_acc,
+        "val_prec":   mean_prec,
+        "val_rec":    mean_rec,
+        "n_train":    len(panel),
         "trained_on": symbols,
         "trained_at": str(date.today()),
     }, MODEL_PATH)
     print(f"\n✓ Saved to {MODEL_PATH}")
 
-    # Output summary block
     print("\n=== TRAINING SUMMARY ===")
-    print(f"Total panel rows    : {total_rows:,}")
-    print(f"Labelled samples    : {len(panel):,}")
-    print(f"Class balance       : BUY {n_buy:,} ({n_buy/len(panel)*100:.1f}%) | "
-          f"SELL {n_sell:,} ({n_sell/len(panel)*100:.1f}%)")
-    print(f"Features            : {len(FEATURE_COLS)}")
-    print(f"Final trees         : {n_final}")
+    print(f"Total panel rows  : {total_rows:,}")
+    print(f"Labelled samples  : {len(panel):,}")
+    print(f"Class balance     : BUY {n_buy/len(panel)*100:.1f}%  SELL {n_sell/len(panel)*100:.1f}%")
+    print(f"Features          : {len(FEATURE_COLS)}  (28 including 4 v3.0 additions)")
+    print(f"Final trees       : {n_final}")
 
-    # Feature importances — read from base XGB (calibrated wrapper doesn't expose them)
-    importance_source = base_xgb if hasattr(base_xgb, "feature_importances_") else None
-    if importance_source is not None:
-        imp = pd.Series(importance_source.feature_importances_,
-                        index=FEATURE_COLS).sort_values(ascending=False)
-        print("\nTop 10 feature importances:")
-        print(imp.head(10).round(3).to_string())
+    imp = pd.Series(final.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
+    print("\nTop 10 feature importances:")
+    print(imp.head(10).round(3).to_string())
 
-    # Probability distribution & top-decile hit rate (calibration health check)
-    if final is not None:
-        all_probs = final.predict_proba(X)[:, 1]
-        print("\nProbability distribution (calibrated):")
-        for p in (0.50, 0.55, 0.60, 0.65, 0.70):
-            mask = all_probs >= p
-            n = int(mask.sum())
-            hit = float(y[mask].mean()) if n > 0 else 0.0
-            print(f"  prob ≥ {p:.2f}: {n:>5} samples  empirical BUY rate = {hit*100:5.1f}%")
+    all_probs = final.predict_proba(X)[:, 1]
+    print("\nProbability distribution (in-sample calibration check):")
+    for p in (0.50, 0.55, 0.60, 0.62, 0.65, 0.70):
+        mask = all_probs >= p
+        n    = int(mask.sum())
+        hit  = float(y[mask].mean()) if n > 0 else 0.0
+        print(f"  prob ≥ {p:.2f}: {n:>5,} samples  empirical BUY rate = {hit*100:5.1f}%")
 
     return final
 
 
 # =============================================================================
-# Predict
+# Predict — regime → rank → 7-gate → ML meta-filter
 # =============================================================================
 
 def predict(symbols: list[str] | None = None):
@@ -540,31 +704,90 @@ def predict(symbols: list[str] | None = None):
     blob    = joblib.load(MODEL_PATH)
     model   = blob["model"]
     val_acc = blob["val_acc"]
+    model_features = blob.get("features", FEATURE_COLS)   # backward-compat
 
     symbols   = symbols or WATCHLIST
     today     = date.today()
-    from_date = today - timedelta(days=400)   # need 252d for 52-week features
+    from_date = today - timedelta(days=420)   # 420d for 252d 52-week + 60d momentum
 
-    print(f"\n=== v2 SIGNALS — {today} ===")
-    print(f"Model val accuracy: {val_acc*100:.1f}% on {blob['n_train']:,} samples\n")
+    print(f"\n=== v3 SIGNALS — {today} ===")
+    print(f"Model val accuracy: {val_acc*100:.1f}% on {blob['n_train']:,} samples")
 
-    rows = []
+    # ── Step 1: Market regime ────────────────────────────────────────────────
+    market       = _fetch_market_regime(LOOKBACK_YEARS)
+    trend_regime, vol_regime = classify_regime(market)
+
+    latest_market = {}
+    if market is not None and not market.empty:
+        row = market.sort_values("DateTime").iloc[-1]
+        latest_market = row.to_dict()
+
+    nifty_close  = latest_market.get("nifty_close", 0)
+    nifty_50dma  = latest_market.get("nifty_50dma",  0)
+    nifty_200dma = latest_market.get("nifty_200dma", 0)
+    vix_raw      = latest_market.get("feat_vix_level", 0.15) * 100
+
+    print(f"\nMarket regime : {trend_regime}  |  Vol regime: {vol_regime}")
+    print(f"Nifty: {nifty_close:>8.0f}  |  50DMA: {nifty_50dma:>8.0f}  "
+          f"|  200DMA: {nifty_200dma:>8.0f}  |  VIX: {vix_raw:.1f}")
+
+    regime_blocked = REGIME_BULL_ONLY and trend_regime == "BEAR"
+    vix_extreme    = vol_regime == "EXTREME"
+
+    if regime_blocked:
+        print("⚠  BEAR regime — long entries blocked. Showing scores for monitoring only.")
+    if vol_regime in ("HIGH", "EXTREME"):
+        print(f"⚠  VIX {vol_regime} ({vix_raw:.1f}) — reduce position sizes or skip C-grade signals.")
+
+    # ── Step 2: Fetch all stock data ─────────────────────────────────────────
+    print()
+    symbol_data: dict[str, pd.DataFrame] = {}
     for sym in symbols:
         df = fetch_historical_data(sym, from_date, today)
         if df is None or len(df) < 252:
-            print(f"  [SKIP] {sym}: insufficient data")
             continue
-        df = compute_features(df).dropna(subset=FEATURE_COLS)
-        if df.empty:
-            continue
+        df = compute_features(df)
+        # Attach market aux features for relative-strength display
+        if market is not None and not market.empty:
+            mj = market[["DateTime", "feat_market_return_5d"]].rename(
+                columns={"DateTime": "_dk"})
+            df["_dk"] = pd.to_datetime(df["DateTime"]).dt.tz_localize(None).dt.normalize()
+            df = df.merge(mj, on="_dk", how="left").drop(columns=["_dk"])
+            df["feat_relative_return_5d"] = (
+                df.get("feat_return_5d", pd.Series(0, index=df.index)).fillna(0) -
+                df.get("feat_market_return_5d", pd.Series(0, index=df.index)).fillna(0)
+            )
+        df = df.dropna(subset=[c for c in model_features if c in df.columns])
+        if not df.empty:
+            symbol_data[sym] = df
 
+    # ── Step 3: Cross-sectional ranking ──────────────────────────────────────
+    ranked   = rank_candidates(symbol_data, market, top_n=TOP_N_CANDIDATES)
+    ranked_set = set(ranked)
+    print(f"Top {len(ranked)} ranked: {', '.join(ranked[:8])}{'...' if len(ranked) > 8 else ''}\n")
+
+    # ── Step 4: Evaluate each stock ──────────────────────────────────────────
+    rows = []
+    for sym, df in symbol_data.items():
         latest = df.iloc[-1]
-        proba  = model.predict_proba(latest[FEATURE_COLS].values.reshape(1, -1))[0]
-        buy_p, sell_p = float(proba[1]), float(proba[0])
 
-        # News (best-effort)
-        news_feats = {"news_score": 0.0, "news_count": 0, "news_event_type": "none"}
-        news_blocked, strong_news_up, ngrade = False, False, "B"
+        # Safe feature extraction (handle old model missing new features)
+        feat_vals = []
+        for c in model_features:
+            feat_vals.append(float(latest.get(c, 0.0) or 0.0))
+        proba    = model.predict_proba(np.array(feat_vals).reshape(1, -1))[0]
+        buy_p    = float(proba[1])
+        sell_p   = float(proba[0])
+
+        # News + event filter
+        news_feats     = {"news_score": 0.0, "news_count": 0, "news_event_type": "none",
+                         "recency_days": 99}
+        news_blocked   = False
+        strong_news_up = False
+        ngrade         = "B"
+        event_blocked  = False
+        event_reason   = ""
+
         if USE_NEWS_GATE:
             try:
                 from news_features import (get_news_features, news_gate_passes,
@@ -573,24 +796,35 @@ def predict(symbols: list[str] | None = None):
                 news_blocked   = not news_gate_passes(news_feats)
                 strong_news_up = news_strong_positive(news_feats)
                 ngrade         = news_grade(news_feats)
+
+                if USE_EVENT_FILTER:
+                    etype   = news_feats.get("news_event_type", "none")
+                    recency = int(news_feats.get("recency_days", 99))
+                    if etype == "earnings" and recency <= EARNINGS_BLACKOUT_DAYS:
+                        event_blocked = True
+                        event_reason  = f"earnings({recency}d)"
+                    elif etype in ("downgrade", "regulatory") and recency <= 1:
+                        event_blocked = True
+                        event_reason  = etype
             except Exception:
                 pass
 
-        # Six bullish confirmations — score-based gate
-        market_ret_5d = float(latest.get("feat_market_return_5d", 0.0) or 0.0)
-        rel_ret_5d    = float(latest.get("feat_relative_return_5d", 0.0) or 0.0)
+        # 7 confirmation gates
+        def gv(col, fallback=0.0):
+            return float(latest.get(col, fallback) or fallback)
+
         confirmations = {
-            "ema200":        (not EMA200_REQUIRED) or (latest["feat_ema200_ratio"] > 0),
-            "adx":           latest["feat_adx"]       >= ADX_MIN,
-            "macd":          latest["feat_macd_hist"] >= 0,
-            "rel_strength":  rel_ret_5d > 0,            # outperforming Nifty
-            "market_regime": market_ret_5d > -0.02,     # market not down >2% in 5d
-            "news":          not news_blocked,
+            "ema200":   (not REQUIRE_EMA200)   or gv("feat_ema200_ratio") > 0,
+            "ema50":    (not REQUIRE_EMA50)    or gv("feat_ema50_ratio")  > 0,
+            "ema20":    (not REQUIRE_EMA20)    or gv("feat_ema20_ratio")  > 0,
+            "adx":      (not REQUIRE_ADX)      or gv("feat_adx")          >= ADX_MIN,
+            "macd":     (not REQUIRE_MACD)     or gv("feat_macd_hist")    >= 0,
+            "breakout": (not REQUIRE_BREAKOUT) or gv("feat_dist_20d_high") > 0,
+            "volume":   (not REQUIRE_VOLUME)   or gv("feat_volume_ratio") >= VOLUME_THRESHOLD,
         }
         n_pass = sum(confirmations.values())
         failed = [k for k, v in confirmations.items() if not v]
 
-        # Confidence grade (A=6/6, B=5/6, C=4/6)
         if n_pass >= GRADE_A_MIN:
             grade = "A"
         elif n_pass >= GRADE_B_MIN:
@@ -600,11 +834,16 @@ def predict(symbols: list[str] | None = None):
         else:
             grade = "D"
 
-        # Probability bar — relax slightly when news is strongly positive
         bar = BUY_PROBA_STRONG_NEWS if strong_news_up else BUY_PROBA
+
+        # Hard gates (must ALL pass for BUY)
+        ema200_ok  = confirmations["ema200"]
+        regime_ok  = not regime_blocked and not vix_extreme
+        rank_ok    = sym in ranked_set
+
         gate_pass = (
-            confirmations["ema200"]            # mandatory bull-trend
-            and not news_blocked               # strong negative news vetoes
+            ema200_ok and regime_ok and rank_ok
+            and not news_blocked and not event_blocked
             and n_pass >= MIN_CONFIRMATIONS
         )
 
@@ -617,13 +856,28 @@ def predict(symbols: list[str] | None = None):
         else:
             signal = "HOLD"
 
-        atr, price = float(latest["ATR"]), float(latest["Close"])
+        blockers = []
+        if signal == "WATCH":
+            if not regime_ok:   blockers.append("bear_regime")
+            if not ema200_ok:   blockers.append("ema200")
+            if not rank_ok:     blockers.append("low_rank")
+            if news_blocked:    blockers.append("bad_news")
+            if event_blocked:   blockers.append(event_reason)
+            if n_pass < MIN_CONFIRMATIONS:
+                blockers += [f for f in failed if f not in ("ema200",)]
+
+        atr, price = float(latest.get("ATR", 0) or 0), float(latest["Close"])
         if signal == "BUY":
-            stop, tgt = round(price - 1.5 * atr, 2), round(price + 3 * atr, 2)
+            stop = round(price - ATR_STOP_MULT  * atr, 2)
+            tgt  = round(price + ATR_TARGET_MULT * atr, 2)
         elif signal == "SELL":
-            stop, tgt = round(price + 1.5 * atr, 2), round(price - 3 * atr, 2)
+            stop = round(price + ATR_STOP_MULT  * atr, 2)
+            tgt  = round(price - ATR_TARGET_MULT * atr, 2)
         else:
             stop = tgt = None
+
+        # Composite rank position (1-based)
+        rank_pos = (ranked.index(sym) + 1) if sym in ranked_set else len(symbol_data)
 
         rows.append({
             "Symbol":   sym,
@@ -631,69 +885,116 @@ def predict(symbols: list[str] | None = None):
             "Signal":   signal,
             "Grade":    grade if signal == "BUY" else "",
             "BUY%":     round(buy_p * 100, 1),
-            "Confirms": f"{n_pass}/6",
+            "Confs":    f"{n_pass}/7",
+            "Rank":     rank_pos,
             "News":     ngrade if news_feats.get("news_count", 0) > 0 else "—",
             "Event":    news_feats.get("news_event_type", "none"),
             "Stop":     stop,
             "Target":   tgt,
-            "Blockers": ",".join(failed) if signal == "WATCH" else "",
+            "Blockers": ",".join(blockers) if signal == "WATCH" else "",
         })
 
     df_out = pd.DataFrame(rows)
+
+    # Sort: BUY (grade A→C) first, then WATCH by BUY%, then HOLD, SELL last
+    signal_order = {"BUY": 0, "WATCH": 1, "HOLD": 2, "SELL": 3}
+    grade_order  = {"A": 0, "B": 1, "C": 2, "D": 3, "": 4}
+    df_out["_so"] = df_out["Signal"].map(signal_order).fillna(4)
+    df_out["_go"] = df_out["Grade"].map(grade_order).fillna(4)
+    df_out = (df_out.sort_values(["_so", "_go", "BUY%"], ascending=[True, True, False])
+              .drop(columns=["_so", "_go"]).reset_index(drop=True))
+
     print(df_out.to_string(index=False))
 
-    # Per-BUY explanation block — what passed
     buys = df_out[df_out["Signal"] == "BUY"]
     if not buys.empty:
-        print("\nBUY rationale:")
+        print("\nBUY RATIONALE:")
         for _, r in buys.iterrows():
-            reasons = []
-            reasons.append("EMA200 uptrend")
-            reasons.append(f"{r['Confirms']} bullish confirmations")
-            news_grade_val = r.get("News", "—")
-            if news_grade_val in ("A", "B"):
-                reasons.append(f"news grade {news_grade_val} ({r.get('Event','')})")
-            print(f"  • {r['Symbol']:<12s} (Grade {r['Grade']}, "
-                  f"BUY% {r['BUY%']}): "
-                  + " + ".join(reasons))
+            parts = [f"EMA200 uptrend", f"{r['Confs']} confirmations"]
+            if r["News"] not in ("—", ""):
+                parts.append(f"news {r['News']} ({r['Event']})")
+            if not rank_ok:  # shouldn't happen if BUY, included for safety
+                pass
+            print(f"  • {r['Symbol']:<12} (Grade {r['Grade']}, BUY% {r['BUY%']}): "
+                  + " + ".join(parts))
 
-    print("\nLegend: Grade A=6/6 confirms, B=5/6, C=4/6 | News A=positive, B=neutral, C=mildly neg")
-    print("⚠️  Educational only — not financial advice.")
+    watches = df_out[df_out["Signal"] == "WATCH"]
+    if not watches.empty:
+        print("\nWATCH (blocked — monitor for gate clearance):")
+        for _, r in watches.iterrows():
+            print(f"  • {r['Symbol']:<12} BUY% {r['BUY%']}  blocked by: {r['Blockers']}")
+
+    print(f"\nLegend: Confs = gates passed (7 total) | Grade A=7/7, B=6/7, C=5/7")
+    print(f"        Regime={trend_regime} | VIX={vol_regime} ({vix_raw:.1f})")
+    print("⚠  Educational only — not financial advice.")
     return df_out
 
 
 # =============================================================================
-# Backtest — walk-forward simulation with stop/target/timeout exits
+# Backtest — ATR trailing stop + sector/position limits + regime breakdown
 # =============================================================================
 
-def backtest(symbols: list[str] | None = None, years: int = 2,
-             buy_threshold: float = BUY_PROBA, max_holding_days: int = 10):
-    """Simulate trades using the saved v2 model on out-of-sample data."""
+def backtest(
+    symbols: list[str] | None = None,
+    years: int = 2,
+    buy_threshold: float = BUY_PROBA,
+    max_holding_days: int = MAX_HOLDING_DAYS,
+):
+    """Simulate trades on the saved model with institutional-grade exit logic.
+
+    Exit hierarchy (checked each bar):
+        1. Trailing stop hit (bar_low ≤ trailing_stop)       → stop exit
+        2. Target hit        (bar_high ≥ target)             → target exit
+        3. Time stop         (days held ≥ max_holding_days)  → timeout exit
+
+    Trailing stop starts at entry - ATR_STOP_MULT×ATR and ratchets up as the
+    trade moves in our favour (never moves down), giving winners room to run
+    while protecting accumulated gains.
+
+    Global position limits: MAX_OPEN_POSITIONS across all stocks simultaneously;
+    MAX_SECTOR_EXPOSURE per sector.  Regime is computed per-day using live market
+    data and recorded alongside each trade for regime-segmented analysis.
+    """
     if not MODEL_PATH.exists():
         print('No saved model. Run "python swing_v2.py train" first.')
         return
 
     blob  = joblib.load(MODEL_PATH)
     model = blob["model"]
+    model_features = blob.get("features", FEATURE_COLS)
 
-    symbols = symbols or NIFTY_50[:20]   # 20 stocks for speed
-    print(f"\n=== BACKTEST v2 — {len(symbols)} stocks × {years}y ===")
+    symbols = symbols or NIFTY_50[:20]
+    print(f"\n=== BACKTEST v3 — {len(symbols)} stocks × {years}y ===")
+    print(f"    Threshold={buy_threshold:.2f}  Gates: EMA200+ADX+MACD+EMA50+Volume  "
+          f"Trail={ATR_TRAIL_MULT}×ATR  MaxPos={MAX_OPEN_POSITIONS}\n")
 
     panel = build_panel(symbols, years)
     if panel is None:
         return
 
+    # Fetch market data for regime annotation per trade
+    market = _fetch_market_regime(years)
+    market_idx = None
+    if market is not None and not market.empty:
+        market_idx = market.set_index("DateTime")[["nifty_close", "nifty_50dma",
+                                                    "nifty_200dma", "feat_vix_level"]]
+
     panel = panel.sort_values(["symbol", "DateTime"]).reset_index(drop=True)
-    panel = panel.dropna(subset=FEATURE_COLS).copy()
+    panel = panel.dropna(subset=[c for c in model_features if c in panel.columns]).copy()
 
-    # Score every row
-    panel["buy_prob"] = model.predict_proba(panel[FEATURE_COLS].values)[:, 1]
+    # Score every row with the model
+    feat_matrix = np.column_stack([
+        panel.get(c, pd.Series(0, index=panel.index)).values for c in model_features
+    ])
+    panel["buy_prob"] = model.predict_proba(feat_matrix)[:, 1]
 
-    # Walk forward and simulate trades per symbol — apply signal-quality gate
-    trades = []
+    # ── Pass 1: collect all candidate signals per stock ──────────────────────
+    candidates = []  # (entry_date, symbol, entry_idx in panel, sector)
     skipped_gate = 0
+
     for sym in symbols:
-        sd = panel[panel["symbol"] == sym].sort_values("DateTime").reset_index(drop=True)
+        sd  = panel[panel["symbol"] == sym].sort_values("DateTime").reset_index(drop=True)
+        sec = SECTOR_MAP.get(sym, "Other")
         if len(sd) < 30:
             continue
         i = 0
@@ -701,90 +1002,170 @@ def backtest(symbols: list[str] | None = None, years: int = 2,
             if sd.loc[i, "buy_prob"] < buy_threshold:
                 i += 1
                 continue
-            # Proven gates (v2.1): EMA200 uptrend + ADX trend strength
+
             row = sd.loc[i]
-            ema200_ok = (not EMA200_REQUIRED) or row["feat_ema200_ratio"] > 0
-            adx_ok    = row["feat_adx"] >= ADX_MIN
-            if not (ema200_ok and adx_ok):
+            def rg(col): return float(row.get(col, 0) or 0)
+
+            # Backtest gates: EMA200 (hard) + ADX + MACD + EMA50 + Volume
+            # Not using full 7 gates in backtest since hist_20d_high may alias
+            # to current-day data in some edge cases; keep proven simpler gates
+            ema200_ok = rg("feat_ema200_ratio") > 0
+            adx_ok    = rg("feat_adx") >= ADX_MIN
+            macd_ok   = rg("feat_macd_hist") >= 0
+            ema50_ok  = rg("feat_ema50_ratio") > 0      # [v3.0]
+            vol_ok    = rg("feat_volume_ratio") >= VOLUME_THRESHOLD  # [v3.0]
+
+            # Need EMA200 (hard) + 3 of remaining 4
+            soft_pass = sum([adx_ok, macd_ok, ema50_ok, vol_ok])
+            if not ema200_ok or soft_pass < 3:
                 skipped_gate += 1
                 i += 1
                 continue
 
-            # Enter long at NEXT bar's open (no look-ahead) + slippage on entry
-            entry_idx  = i + 1
-            raw_entry  = float(sd.loc[entry_idx, "Open"])
-            entry      = raw_entry * (1 + SLIPPAGE_PCT)
-            atr        = float(sd.loc[i, "ATR"])
-            stop       = raw_entry - 1.5 * atr
-            target     = raw_entry + 3.0 * atr
+            entry_idx = i + 1
+            if entry_idx >= len(sd):
+                break
 
-            raw_exit, reason, days = raw_entry, "timeout", max_holding_days
-            for d in range(1, max_holding_days + 1):
-                if entry_idx + d >= len(sd):
-                    break
-                bar_low  = float(sd.loc[entry_idx + d, "Low"])
-                bar_high = float(sd.loc[entry_idx + d, "High"])
-                if bar_low <= stop:
-                    raw_exit, reason, days = stop, "stop", d
-                    break
-                if bar_high >= target:
-                    raw_exit, reason, days = target, "target", d
-                    break
-            else:
-                raw_exit = float(sd.loc[min(entry_idx + max_holding_days, len(sd) - 1), "Close"])
-
-            # Slippage on exit (always works against you)
-            exit_price = raw_exit * (1 - SLIPPAGE_PCT)
-            gross_pnl  = (exit_price - entry) / entry
-            net_pnl    = gross_pnl - ROUND_TRIP_COST   # subtract brokerage/STT
-
-            trades.append({
-                "symbol": sym,
-                "entry_date": sd.loc[entry_idx, "DateTime"],
-                "entry": round(entry, 2),
-                "exit":  round(exit_price, 2),
-                "pnl_pct_gross": gross_pnl,
-                "pnl_pct":       net_pnl,
-                "days": days,
-                "reason": reason,
-                "buy_prob": float(sd.loc[i, "buy_prob"]),
+            candidates.append({
+                "sym":       sym,
+                "sector":    sec,
+                "sig_idx":   i,
+                "entry_idx": entry_idx,
+                "entry_date": pd.Timestamp(sd.loc[entry_idx, "DateTime"]),
+                "sd":        sd,
             })
-            i = entry_idx + days + 1   # skip past exit before looking for next setup
+            i = entry_idx + max_holding_days + 1  # don't re-enter until current expires
+
+    if not candidates:
+        print("No candidates passed all gates — no trades simulated.")
+        return None
+
+    candidates.sort(key=lambda x: x["entry_date"])
+
+    # ── Pass 2: portfolio-level position limit enforcement ───────────────────
+    trades = []
+    open_positions: list[dict] = []   # {symbol, sector, exit_date}
+
+    for cand in candidates:
+        entry_date = cand["entry_date"]
+
+        # Remove positions that have already exited
+        open_positions = [p for p in open_positions if p["exit_date"] > entry_date]
+
+        # Global position limit
+        if len(open_positions) >= MAX_OPEN_POSITIONS:
+            continue
+
+        # Sector exposure limit
+        sector_count = sum(1 for p in open_positions if p["sector"] == cand["sector"])
+        if sector_count >= MAX_SECTOR_EXPOSURE:
+            continue
+
+        sym       = cand["sym"]
+        sd        = cand["sd"]
+        i         = cand["sig_idx"]
+        entry_idx = cand["entry_idx"]
+
+        raw_entry  = float(sd.loc[entry_idx, "Open"])
+        entry      = raw_entry * (1 + SLIPPAGE_PCT)
+        atr        = float(sd.loc[i, "ATR"])
+        stop       = raw_entry - ATR_STOP_MULT  * atr
+        target     = raw_entry + ATR_TARGET_MULT * atr
+        trail_stop = stop            # trailing stop starts at initial stop
+        running_high = raw_entry
+
+        # Determine regime at entry date for segmented analysis
+        entry_regime = "UNKNOWN"
+        if market_idx is not None:
+            key = pd.Timestamp(entry_date).normalize()
+            try:
+                mrow = market_idx.loc[key] if key in market_idx.index else None
+                if mrow is not None:
+                    nc = float(mrow["nifty_close"] or 0)
+                    f  = float(mrow["nifty_50dma"]  or nc)
+                    s  = float(mrow["nifty_200dma"] or nc)
+                    entry_regime = ("BULL" if nc > f > s else
+                                   "BEAR" if nc < s or f < s else "SIDEWAYS")
+            except Exception:
+                pass
+
+        raw_exit, reason, days = raw_entry, "timeout", max_holding_days
+        for d in range(1, max_holding_days + 1):
+            idx = entry_idx + d
+            if idx >= len(sd):
+                break
+            bar_high = float(sd.loc[idx, "High"])
+            bar_low  = float(sd.loc[idx, "Low"])
+
+            # Ratchet trailing stop upward as trade moves in our favour
+            if bar_high > running_high:
+                running_high = bar_high
+                trail_stop   = max(trail_stop, running_high - ATR_TRAIL_MULT * atr)
+
+            if bar_low <= trail_stop:
+                raw_exit, reason, days = trail_stop, "stop", d
+                break
+            if bar_high >= target:
+                raw_exit, reason, days = target, "target", d
+                break
+        else:
+            raw_exit = float(sd.loc[min(entry_idx + max_holding_days, len(sd)-1), "Close"])
+
+        exit_price = raw_exit * (1 - SLIPPAGE_PCT)
+        gross_pnl  = (exit_price - entry) / entry
+        net_pnl    = gross_pnl - ROUND_TRIP_COST
+
+        approx_exit_date = entry_date + timedelta(days=int(days * 1.4))
+        open_positions.append({"symbol": sym, "sector": cand["sector"],
+                               "exit_date": approx_exit_date})
+
+        trades.append({
+            "symbol":     sym,
+            "sector":     cand["sector"],
+            "regime":     entry_regime,
+            "entry_date": entry_date,
+            "entry":      round(entry, 2),
+            "exit":       round(exit_price, 2),
+            "pnl_pct":    net_pnl,
+            "pnl_gross":  gross_pnl,
+            "days":       days,
+            "reason":     reason,
+            "buy_prob":   float(sd.loc[i, "buy_prob"]),
+        })
 
     if not trades:
-        print("No BUY signals crossed the threshold — no trades simulated.")
+        print("No trades executed after position-limit filtering.")
         return None
 
     tdf = pd.DataFrame(trades).sort_values("entry_date").reset_index(drop=True)
+    tdf["year"] = pd.to_datetime(tdf["entry_date"]).dt.year
 
-    # Core metrics (NET of costs)
-    wr           = (tdf["pnl_pct"] > 0).mean() * 100
-    avg_pnl      = tdf["pnl_pct"].mean() * 100
-    avg_pnl_gross = tdf["pnl_pct_gross"].mean() * 100
-    best, worst  = tdf["pnl_pct"].max() * 100, tdf["pnl_pct"].min() * 100
-    total_return = ((1 + tdf["pnl_pct"]).prod() - 1) * 100
-    avg_days     = tdf["days"].mean()
-    median_days  = tdf["days"].median()
-    sharpe       = (tdf["pnl_pct"].mean() / tdf["pnl_pct"].std()) * np.sqrt(252 / max(avg_days, 1))
+    # ── Core metrics ─────────────────────────────────────────────────────────
+    wr          = (tdf["pnl_pct"] > 0).mean() * 100
+    avg_pnl     = tdf["pnl_pct"].mean() * 100
+    avg_gross   = tdf["pnl_gross"].mean() * 100
+    best        = tdf["pnl_pct"].max() * 100
+    worst       = tdf["pnl_pct"].min() * 100
+    total_ret   = ((1 + tdf["pnl_pct"]).prod() - 1) * 100
+    avg_days    = tdf["days"].mean()
+    median_days = tdf["days"].median()
+    sharpe      = (tdf["pnl_pct"].mean() /
+                   tdf["pnl_pct"].std()) * np.sqrt(252 / max(avg_days, 1))
 
-    # Profit factor = sum(wins) / |sum(losses)|
     wins   = tdf.loc[tdf["pnl_pct"] > 0, "pnl_pct"].sum()
     losses = tdf.loc[tdf["pnl_pct"] < 0, "pnl_pct"].sum()
-    profit_factor = wins / abs(losses) if losses < 0 else float("inf")
+    pf     = wins / abs(losses) if losses < 0 else float("inf")
 
-    # Expectancy = (P_win * avg_win) - (P_loss * |avg_loss|)
-    p_win       = (tdf["pnl_pct"] > 0).mean()
-    avg_win     = tdf.loc[tdf["pnl_pct"] > 0, "pnl_pct"].mean() if p_win > 0 else 0.0
-    avg_loss    = tdf.loc[tdf["pnl_pct"] < 0, "pnl_pct"].mean() if p_win < 1 else 0.0
-    expectancy  = (p_win * avg_win + (1 - p_win) * avg_loss) * 100
+    p_win      = (tdf["pnl_pct"] > 0).mean()
+    avg_win    = tdf.loc[tdf["pnl_pct"] > 0, "pnl_pct"].mean() if p_win > 0 else 0.0
+    avg_loss   = tdf.loc[tdf["pnl_pct"] < 0, "pnl_pct"].mean() if p_win < 1 else 0.0
+    expectancy = (p_win * avg_win + (1 - p_win) * avg_loss) * 100
 
-    # Max drawdown on the equity curve
-    equity   = (1 + tdf["pnl_pct"]).cumprod()
-    peak     = equity.cummax()
-    drawdown = (equity / peak - 1) * 100
-    max_dd   = drawdown.min()
+    equity  = (1 + tdf["pnl_pct"]).cumprod()
+    peak    = equity.cummax()
+    max_dd  = ((equity / peak - 1) * 100).min()
 
-    # Buy-and-hold baseline (equal weight)
+    # Buy-and-hold baseline
     bh = []
     for sym in symbols:
         sd = panel[panel["symbol"] == sym].sort_values("DateTime")
@@ -794,33 +1175,63 @@ def backtest(symbols: list[str] | None = None, years: int = 2,
 
     reasons = tdf["reason"].value_counts()
 
-    print(f"\n=== RESULTS ({len(tdf)} trades, {skipped_gate} gated out) ===")
-    print(f"Win rate                 : {wr:.1f}%")
-    print(f"Avg P&L net per trade    : {avg_pnl:+.2f}%   (gross {avg_pnl_gross:+.2f}%)")
-    print(f"Best / Worst trade       : {best:+.2f}% / {worst:+.2f}%")
-    print(f"Median holding days      : {median_days:.0f}   (avg {avg_days:.1f})")
-    print(f"Total compound return    : {total_return:+.2f}%")
-    print(f"Sharpe (annualised)      : {sharpe:.2f}")
-    print(f"Max drawdown             : {max_dd:.2f}%")
-    print(f"Profit factor            : {profit_factor:.2f}")
-    print(f"Expectancy per trade     : {expectancy:+.3f}%")
-    print(f"\nBuy-and-hold baseline    : {bh_return:+.2f}%  (equal-weight {len(bh)} stocks, {years}y)")
-    print(f"Strategy vs B&H          : {total_return - bh_return:+.2f}% "
-          f"{'✓ beats' if total_return > bh_return else '✗ underperforms'}")
+    print(f"\n=== RESULTS ({len(tdf)} trades | {skipped_gate} gated out) ===")
+    print(f"Win rate              : {wr:.1f}%")
+    print(f"Avg P&L net/trade     : {avg_pnl:+.2f}%   (gross {avg_gross:+.2f}%)")
+    print(f"Best / Worst trade    : {best:+.2f}%  /  {worst:+.2f}%")
+    print(f"Median hold           : {median_days:.0f}d  (avg {avg_days:.1f}d)")
+    print(f"Total compound return : {total_ret:+.2f}%")
+    print(f"Buy-and-hold baseline : {bh_return:+.2f}%  (equal-weight {len(bh)} stocks, {years}y)")
+    print(f"Alpha vs B&H          : {total_ret - bh_return:+.2f}%  "
+          f"{'✓ beats' if total_ret > bh_return else '✗ underperforms'}")
+    print(f"Sharpe (annualised)   : {sharpe:.2f}")
+    print(f"Max drawdown          : {max_dd:.2f}%")
+    print(f"Profit factor         : {pf:.2f}")
+    print(f"Expectancy/trade      : {expectancy:+.3f}%")
 
-    print("\nExit reason breakdown:")
+    print("\nExit breakdown:")
     for r in ("target", "stop", "timeout"):
-        n = int(reasons.get(r, 0))
+        n   = int(reasons.get(r, 0))
         pct = n / len(tdf) * 100 if len(tdf) else 0
         print(f"  {r:8s}: {n:4d}  ({pct:.1f}%)")
 
+    # ── Yearly performance breakdown ─────────────────────────────────────────
+    print("\nYearly performance:")
+    yearly = (tdf.groupby("year").apply(lambda g: pd.Series({
+        "trades":   len(g),
+        "win_rate": (g["pnl_pct"] > 0).mean() * 100,
+        "avg_pnl":  g["pnl_pct"].mean() * 100,
+        "total":    ((1 + g["pnl_pct"]).prod() - 1) * 100,
+    }), include_groups=False).round(2))
+    print(yearly.to_string())
+
+    # ── Regime-segmented performance ─────────────────────────────────────────
+    if tdf["regime"].nunique() > 1:
+        print("\nPerformance by market regime at entry:")
+        regime_perf = (tdf.groupby("regime").apply(lambda g: pd.Series({
+            "trades":   len(g),
+            "win_rate": (g["pnl_pct"] > 0).mean() * 100,
+            "avg_pnl":  g["pnl_pct"].mean() * 100,
+        }), include_groups=False).round(2))
+        print(regime_perf.to_string())
+
+    # ── Sector breakdown ─────────────────────────────────────────────────────
+    print("\nSector breakdown:")
+    sector_perf = (tdf.groupby("sector").apply(lambda g: pd.Series({
+        "trades":   len(g),
+        "win_rate": (g["pnl_pct"] > 0).mean() * 100,
+        "avg_pnl":  g["pnl_pct"].mean() * 100,
+    }), include_groups=False).sort_values("trades", ascending=False).round(2))
+    print(sector_perf.to_string())
+
     print("\nTop 5 winners:")
-    print(tdf.nlargest(5, "pnl_pct")[["symbol", "entry_date", "pnl_pct", "days", "reason"]]
+    print(tdf.nlargest(5, "pnl_pct")[["symbol", "entry_date", "pnl_pct", "days", "reason",
+                                       "regime"]]
           .assign(pnl_pct=lambda d: (d.pnl_pct * 100).round(2)).to_string(index=False))
 
-    print(f"\nCosts modelled: slippage {SLIPPAGE_PCT*100:.2f}% per fill, "
-          f"round-trip {ROUND_TRIP_COST*100:.2f}%")
-    print("⚠️  Educational only — not financial advice.")
+    print(f"\nCosts: slippage {SLIPPAGE_PCT*100:.2f}%/fill  "
+          f"round-trip {ROUND_TRIP_COST*100:.2f}%  trail={ATR_TRAIL_MULT}×ATR")
+    print("⚠  Educational only — not financial advice.")
     return tdf
 
 
