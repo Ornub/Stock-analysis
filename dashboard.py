@@ -1787,7 +1787,90 @@ with tab4:
   </div>
 </div>""", unsafe_allow_html=True)
 
-        # ── Row 5: Feature importance bar chart ───────────────────────
+        # ── Row 5: Zerodha Phase 2 intraday panel (shown when configured) ────
+        _zerodha_ready = False
+        try:
+            from zerodha_data.config import api_key as _zk
+            _zerodha_ready = _zk != "YOUR_API_KEY"
+        except Exception:
+            pass
+
+        if _zerodha_ready:
+            with st.expander("Intraday Intelligence (Zerodha)", expanded=True):
+                st.markdown("<div style='font-size:0.72rem;color:#64748b;margin-bottom:10px'>Live intraday signals from Zerodha Kite Connect — VWAP, Opening Range Breakout, market depth.</div>", unsafe_allow_html=True)
+                try:
+                    from zerodha_data import get_kite, get_intraday_features, TokenExpiredError
+                    with st.spinner("Fetching intraday data…"):
+                        kite_inst = get_kite()
+                        id_feats  = get_intraday_features(dd_symbol, kite=kite_inst)
+
+                    if id_feats.get("data_ok"):
+                        ic1, ic2, ic3, ic4 = st.columns(4)
+                        vwap_r  = id_feats["vwap_ratio"]
+                        orb     = id_feats["orb_signal"]
+                        vsurge  = id_feats["intraday_vol_surge"]
+                        depth   = id_feats["depth_score"]
+                        mrng    = id_feats["morning_range_pos"]
+
+                        vwap_col = "#16a34a" if vwap_r > 1.005 else ("#dc2626" if vwap_r < 0.995 else "#64748b")
+                        orb_col  = "#16a34a" if orb > 0 else ("#dc2626" if orb < 0 else "#64748b")
+                        orb_lbl  = "Above ORB ▲" if orb > 0 else ("Below ORB ▼" if orb < 0 else "Inside Range")
+
+                        ic1.markdown(f"""<div class='card' style='text-align:center;padding:12px'>
+<div style='font-size:0.62rem;color:#94a3b8;font-weight:700'>VWAP RATIO</div>
+<div style='font-size:1.3rem;font-weight:800;color:{vwap_col}'>{vwap_r:.3f}</div>
+<div style='font-size:0.68rem;color:#64748b'>{"Above VWAP" if vwap_r>1 else "Below VWAP"}</div>
+</div>""", unsafe_allow_html=True)
+
+                        ic2.markdown(f"""<div class='card' style='text-align:center;padding:12px'>
+<div style='font-size:0.62rem;color:#94a3b8;font-weight:700'>ORB SIGNAL</div>
+<div style='font-size:1.1rem;font-weight:800;color:{orb_col}'>{orb_lbl}</div>
+<div style='font-size:0.68rem;color:#64748b'>Range pos {mrng*100:.0f}%</div>
+</div>""", unsafe_allow_html=True)
+
+                        vol_col = "#16a34a" if vsurge >= 1.5 else ("#ca8a04" if vsurge >= 1.0 else "#64748b")
+                        ic3.markdown(f"""<div class='card' style='text-align:center;padding:12px'>
+<div style='font-size:0.62rem;color:#94a3b8;font-weight:700'>VOL SURGE</div>
+<div style='font-size:1.3rem;font-weight:800;color:{vol_col}'>{vsurge:.2f}×</div>
+<div style='font-size:0.68rem;color:#64748b'>vs 20d avg same time</div>
+</div>""", unsafe_allow_html=True)
+
+                        if not pd.isna(depth):
+                            dep_col = "#16a34a" if depth >= 0.55 else ("#dc2626" if depth <= 0.45 else "#64748b")
+                            dep_lbl = "Buyers dominant" if depth >= 0.55 else ("Sellers dominant" if depth <= 0.45 else "Balanced")
+                            ic4.markdown(f"""<div class='card' style='text-align:center;padding:12px'>
+<div style='font-size:0.62rem;color:#94a3b8;font-weight:700'>DEPTH SCORE</div>
+<div style='font-size:1.3rem;font-weight:800;color:{dep_col}'>{depth*100:.0f}%</div>
+<div style='font-size:0.68rem;color:#64748b'>{dep_lbl}</div>
+</div>""", unsafe_allow_html=True)
+                        else:
+                            ic4.caption("Depth unavailable\n(market closed)")
+                    else:
+                        st.info("No intraday data today — market may be closed or token expired.")
+
+                except TokenExpiredError as e:
+                    st.warning(str(e))
+                except Exception as ex:
+                    st.error(f"Intraday fetch error: {ex}")
+        else:
+            with st.expander("Intraday Intelligence — Phase 2 (Zerodha)", expanded=False):
+                st.markdown("""
+<div class='card' style='padding:16px'>
+  <div style='font-size:0.85rem;font-weight:700;color:#1e293b;margin-bottom:6px'>Configure Zerodha to unlock real-time intraday signals</div>
+  <div style='font-size:0.78rem;color:#64748b;line-height:1.7'>
+    Once your Kite Connect credentials are added to <code>zerodha_data/config.py</code>,
+    this panel shows:<br>
+    • <b>VWAP ratio</b> — is price trading above or below the institutional benchmark?<br>
+    • <b>Opening Range Breakout</b> — has price broken the first-15-min high/low?<br>
+    • <b>Intraday volume surge</b> — today's volume vs 20-day average at same time<br>
+    • <b>Market depth score</b> — real-time bid/ask pressure (buy % of total depth)
+  </div>
+  <div style='margin-top:10px;font-size:0.72rem;color:#94a3b8'>
+    Run: <code>python zerodha_data/auth.py login</code> each morning to refresh token.
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # ── Row 6: Feature importance bar chart ───────────────────────
         with st.expander("Model Feature Diagnostics", expanded=False):
             st.markdown("<div style='font-size:0.72rem;color:#64748b;margin-bottom:8px'>Current feature values used by the XGBoost model. Green = bullish direction, red = bearish.</div>", unsafe_allow_html=True)
             feat_vals = {}

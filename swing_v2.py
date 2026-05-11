@@ -787,6 +787,37 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
 # Predict — regime → rank → 7-gate → ML meta-filter
 # =============================================================================
 
+def _add_intraday_overlay(df_out: pd.DataFrame) -> None:
+    """Enrich df_out in-place with Zerodha intraday features.
+
+    Adds columns: vwap_ratio, orb_signal, intraday_vol_surge, depth_score.
+    Silently no-ops if Zerodha config is placeholder or token is missing.
+    """
+    try:
+        from zerodha_data.config import api_key
+        if api_key == "YOUR_API_KEY":
+            return  # credentials not configured yet
+        from zerodha_data import get_kite, get_batch_intraday_features, TokenExpiredError
+        kite    = get_kite()
+        symbols = df_out["Symbol"].tolist()
+        print("[Zerodha] Fetching intraday features…")
+        feats   = get_batch_intraday_features(symbols, kite=kite)
+
+        df_out["vwap_ratio"]         = df_out["Symbol"].map(
+            lambda s: feats.get(s, {}).get("vwap_ratio",         1.0))
+        df_out["orb_signal"]         = df_out["Symbol"].map(
+            lambda s: feats.get(s, {}).get("orb_signal",         0))
+        df_out["intraday_vol_surge"] = df_out["Symbol"].map(
+            lambda s: feats.get(s, {}).get("intraday_vol_surge", 1.0))
+        df_out["depth_score"]        = df_out["Symbol"].map(
+            lambda s: feats.get(s, {}).get("depth_score",        float("nan")))
+        print("[Zerodha] Intraday overlay applied.")
+    except TokenExpiredError as e:
+        print(e)
+    except Exception:
+        pass  # never break the main predict() if intraday is unavailable
+
+
 def predict(symbols: list[str] | None = None):
     if not MODEL_PATH.exists():
         print('No saved model. Run "python swing_v2.py train" first.')
@@ -986,6 +1017,11 @@ def predict(symbols: list[str] | None = None):
         })
 
     df_out = pd.DataFrame(rows)
+
+    # ── Phase 2: Zerodha intraday overlay (optional) ─────────────────────────
+    # Adds vwap_ratio, orb_signal, intraday_vol_surge, depth_score columns.
+    # Silently skipped if Zerodha credentials are not configured.
+    _add_intraday_overlay(df_out)
 
     # Sort: BUY (grade A→C) first, then WATCH by BUY%, then HOLD, SELL last
     signal_order = {"BUY": 0, "WATCH": 1, "HOLD": 2, "SELL": 3}
