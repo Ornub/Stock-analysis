@@ -1536,11 +1536,15 @@ with tab3:
 # ═══════════════════════════════════════════════════════════════════════
 
 with tab4:
-    st.markdown("### Deep Dive Analysis")
-
-    dd_symbol = st.selectbox("Stock", NIFTY_50,
-                              index=NIFTY_50.index(selected_symbol) if selected_symbol in NIFTY_50 else 0,
-                              key="dd_sym")
+    # ── Deep Dive header row ──────────────────────────────────────────
+    dd_h1, dd_h2 = st.columns([2, 1])
+    with dd_h1:
+        st.markdown("### Deep Dive Analysis")
+        st.caption("Full technical breakdown · chart · risk calculator · model diagnostics")
+    with dd_h2:
+        dd_symbol = st.selectbox("Stock", NIFTY_50,
+                                  index=NIFTY_50.index(selected_symbol) if selected_symbol in NIFTY_50 else 0,
+                                  key="dd_sym", label_visibility="collapsed")
 
     with st.spinner(f"Loading {dd_symbol}…"):
         dd_df = get_stock_data(dd_symbol, 365 + 200)
@@ -1551,118 +1555,260 @@ with tab4:
         dd_last  = dd_df.iloc[-1]
         dd_price = float(dd_last["Close"])
         dd_atr   = float(dd_last.get("ATR", 0) or 0)
-
-        # Intelligence card
-        intel = classify_stock_state(dd_last)
-        i_html = ""
-        for label, (text, cls) in [("Trend", intel["trend"]), ("Momentum", intel["momentum"]),
-                                     ("Volatility", intel["volatility"]), ("State", intel["state"])]:
-            i_html += f"<div style='text-align:center'><div style='font-size:0.65rem;color:#64748b;font-weight:600;margin-bottom:2px'>{label.upper()}</div><span class='intel-pill {cls}'>{text}</span></div>"
-
-        st.markdown(f"<div class='card' style='display:flex;gap:24px;justify-content:flex-start;padding:12px 20px'>{i_html}</div>", unsafe_allow_html=True)
-
-        st.markdown("#### Return Profile")
-        rc = st.columns(6)
-        for i, (label, days) in enumerate([("1D",1),("1W",5),("1M",22),("3M",66),("6M",132),("1Y",252)]):
-            if len(dd_df) > days:
-                chg = (dd_price / float(dd_df.iloc[-(days+1)]["Close"]) - 1) * 100
-                rc[i].metric(label, f"{chg:+.2f}%")
-
-        st.markdown("#### 7-Gate Confirmation")
+        dd_rsi   = float(dd_last.get("feat_rsi", 50) or 50)
+        dd_adx   = float(dd_last.get("feat_adx", 0) or 0) * 100
+        dd_volr  = float(dd_last.get("feat_volume_ratio", 1) or 1)
+        dd_prev  = float(dd_df.iloc[-2]["Close"]) if len(dd_df) >= 2 else dd_price
+        dd_chg   = (dd_price / dd_prev - 1) * 100
+        high52   = float(dd_df["High"].tail(252).max())
+        low52    = float(dd_df["Low"].tail(252).min())
+        pct_hi   = (dd_price / high52 - 1) * 100
+        pct_lo   = (dd_price / low52  - 1) * 100
+        pos52_pct = int((dd_price - low52) / (high52 - low52) * 100) if high52 > low52 else 50
 
         def gv_dd(col, fb=0.0):
             return float(dd_last.get(col, fb) or fb)
 
-        gates = {
-            "EMA200\n(price > 200d)": gv_dd("feat_ema200_ratio") > 0,
-            "EMA50\n(price > 50d)":   gv_dd("feat_ema50_ratio")  > 0,
-            "EMA20\n(price > 20d)":   gv_dd("feat_ema20_ratio")  > 0,
-            f"ADX ≥ {ADX_MIN*100:.0f}":    gv_dd("feat_adx")         >= ADX_MIN,
-            "MACD hist ≥ 0":          gv_dd("feat_macd_hist")   >= 0,
-            "Near 20d high":          gv_dd("feat_dist_20d_high") > 0,
-            f"Vol ≥ {VOLUME_THRESHOLD}× avg": gv_dd("feat_volume_ratio") >= VOLUME_THRESHOLD,
-        }
+        # ── Row 1: price hero + intel pills ──────────────────────────
+        hero_col, intel_col = st.columns([1, 2])
+
+        with hero_col:
+            chg_col = "#16a34a" if dd_chg >= 0 else "#dc2626"
+            dd_scan_row = scan_df[scan_df["Symbol"] == dd_symbol] if not scan_df.empty else pd.DataFrame()
+            dd_sig    = dd_scan_row.iloc[0]["Signal"] if not dd_scan_row.empty else "HOLD"
+            dd_grade  = dd_scan_row.iloc[0].get("Grade","") if not dd_scan_row.empty else ""
+            dd_buy_p  = dd_scan_row.iloc[0]["BUY%"] if not dd_scan_row.empty else 0
+            dd_confs  = dd_scan_row.iloc[0]["Confs"] if not dd_scan_row.empty else 0
+            sig_col   = SIGNAL_COLORS.get(dd_sig, "#64748b")
+            sig_bg    = SIGNAL_BG.get(dd_sig, "#f1f5f9")
+            st.markdown(f"""
+<div class='card' style='padding:16px 20px'>
+  <div style='font-size:0.72rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>{dd_symbol} · NSE</div>
+  <div style='font-size:2rem;font-weight:800;color:#1e293b;line-height:1.1'>₹{dd_price:,.1f}</div>
+  <div style='font-size:1rem;font-weight:600;color:{chg_col};margin-bottom:8px'>{dd_chg:+.2f}% today</div>
+  <div style='display:flex;gap:8px;align-items:center;margin-bottom:10px'>
+    <span class='badge badge-{dd_sig}' style='font-size:0.82rem;padding:4px 10px'>{dd_sig}{' ' + dd_grade if dd_grade else ''}</span>
+    <span style='font-size:0.78rem;color:#64748b'>BUY% {dd_buy_p:.0f} · {dd_confs}/7 gates</span>
+  </div>
+  <div style='font-size:0.72rem;color:#64748b;line-height:1.8'>
+    <span style='color:#94a3b8'>ATR</span> ₹{dd_atr:,.1f} &nbsp;·&nbsp;
+    <span style='color:#94a3b8'>RSI</span> {dd_rsi:.1f} &nbsp;·&nbsp;
+    <span style='color:#94a3b8'>ADX</span> {dd_adx:.1f} &nbsp;·&nbsp;
+    <span style='color:#94a3b8'>Vol×</span> {dd_volr:.2f}
+  </div>
+  <div style='margin-top:10px'>
+    <div style='font-size:0.65rem;color:#94a3b8;margin-bottom:3px;font-weight:600'>52-WEEK POSITION — {pos52_pct}%</div>
+    <div style='background:#e2e8f0;border-radius:4px;height:6px;position:relative'>
+      <div style='background:{"#16a34a" if pos52_pct>60 else ("#ca8a04" if pos52_pct>30 else "#dc2626")};
+           height:6px;border-radius:4px;width:{pos52_pct}%'></div>
+    </div>
+    <div style='display:flex;justify-content:space-between;font-size:0.63rem;color:#94a3b8;margin-top:2px'>
+      <span>₹{low52:,.0f}</span><span>₹{high52:,.0f}</span>
+    </div>
+    <div style='font-size:0.65rem;color:#64748b;margin-top:2px'>
+      {pct_hi:.1f}% from 52W high &nbsp;·&nbsp; +{pct_lo:.1f}% from 52W low
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        with intel_col:
+            intel = classify_stock_state(dd_last)
+            i_html = ""
+            for label, (text, cls) in [("Trend", intel["trend"]), ("Momentum", intel["momentum"]),
+                                         ("Volatility", intel["volatility"]), ("State", intel["state"])]:
+                i_html += (f"<div style='flex:1;text-align:center;padding:8px'>"
+                           f"<div style='font-size:0.6rem;color:#94a3b8;font-weight:700;letter-spacing:.5px;margin-bottom:4px'>{label.upper()}</div>"
+                           f"<span class='intel-pill {cls}' style='font-size:0.8rem;padding:5px 12px'>{text}</span></div>")
+
+            # Return profile grid
+            ret_rows = ""
+            for label, days in [("1D",1),("1W",5),("1M",22),("3M",66),("6M",132),("1Y",252)]:
+                if len(dd_df) > days:
+                    chg = (dd_price / float(dd_df.iloc[-(days+1)]["Close"]) - 1) * 100
+                    rc_col = "#16a34a" if chg >= 0 else "#dc2626"
+                    ret_rows += (f"<div style='text-align:center;padding:6px 4px'>"
+                                 f"<div style='font-size:0.65rem;color:#94a3b8;font-weight:600'>{label}</div>"
+                                 f"<div style='font-size:0.88rem;font-weight:700;color:{rc_col}'>{chg:+.2f}%</div>"
+                                 f"</div>")
+
+            st.markdown(f"""
+<div class='card' style='padding:14px 16px;margin-bottom:8px'>
+  <div style='font-size:0.7rem;color:#64748b;font-weight:700;margin-bottom:8px;letter-spacing:.3px'>MARKET STATE</div>
+  <div style='display:flex;gap:0'>{i_html}</div>
+</div>
+<div class='card' style='padding:14px 16px'>
+  <div style='font-size:0.7rem;color:#64748b;font-weight:700;margin-bottom:8px;letter-spacing:.3px'>RETURN PROFILE</div>
+  <div style='display:flex;justify-content:space-between'>{ret_rows}</div>
+</div>""", unsafe_allow_html=True)
+
+        # ── Row 2: 7-Gate confirmation ────────────────────────────────
+        st.markdown("<div style='font-size:0.75rem;font-weight:700;color:#64748b;letter-spacing:.4px;margin:12px 0 8px'>7-GATE CONFIRMATION</div>", unsafe_allow_html=True)
+        gate_defs = [
+            ("EMA 200", "Price above 200d MA — long-term uptrend",    gv_dd("feat_ema200_ratio") > 0),
+            ("EMA 50",  "Price above 50d MA — medium-term trend",     gv_dd("feat_ema50_ratio")  > 0),
+            ("EMA 20",  "Price above 20d MA — short-term momentum",   gv_dd("feat_ema20_ratio")  > 0),
+            (f"ADX {ADX_MIN*100:.0f}",  f"ADX ≥ {ADX_MIN*100:.0f} — trend has strength",      gv_dd("feat_adx") >= ADX_MIN),
+            ("MACD",    "MACD histogram ≥ 0 — momentum rising",       gv_dd("feat_macd_hist") >= 0),
+            ("Breakout","Near 20d high — price breaking resistance",   gv_dd("feat_dist_20d_high") > 0),
+            ("Volume",  f"Vol ≥ {VOLUME_THRESHOLD}× avg — confirmed participation", gv_dd("feat_volume_ratio") >= VOLUME_THRESHOLD),
+        ]
+        n_pass = sum(1 for _, _, p in gate_defs if p)
         g_cols = st.columns(7)
-        for i, (label, passed) in enumerate(gates.items()):
-            icon  = "✅" if passed else "❌"
-            bg    = "#dcfce7" if passed else "#fee2e2"
-            color = "#15803d" if passed else "#b91c1c"
-            border_col = "#86efac" if passed else "#fca5a5"
+        for i, (name, tooltip, passed) in enumerate(gate_defs):
+            icon      = "✓" if passed else "✗"
+            bg        = "#dcfce7" if passed else "#fee2e2"
+            color     = "#15803d" if passed else "#b91c1c"
+            border_c  = "#86efac" if passed else "#fca5a5"
             g_cols[i].markdown(
-                f"<div style='background:{bg};border:1px solid {border_col};border-radius:10px;"
-                f"text-align:center;padding:10px 4px'>"
-                f"<div style='font-size:1.3rem'>{icon}</div>"
-                f"<div style='font-size:0.65rem;color:{color};font-weight:600;line-height:1.3'>{label}</div>"
+                f"<div title='{tooltip}' style='background:{bg};border:1px solid {border_c};"
+                f"border-radius:10px;text-align:center;padding:10px 4px;cursor:help'>"
+                f"<div style='font-size:1.2rem;font-weight:800;color:{color}'>{icon}</div>"
+                f"<div style='font-size:0.68rem;color:{color};font-weight:700;margin-top:2px'>{name}</div>"
                 f"</div>", unsafe_allow_html=True
             )
+        gate_summary = f"{n_pass}/7 gates passed"
+        gate_qual    = "Grade A" if n_pass >= 7 else ("Grade B" if n_pass >= 6 else ("Grade C" if n_pass >= 5 else "Insufficient"))
+        gq_col       = "#16a34a" if n_pass >= 6 else ("#ca8a04" if n_pass >= 5 else "#dc2626")
+        st.markdown(f"<div style='font-size:0.72rem;color:{gq_col};font-weight:600;margin-top:4px'>{gate_summary} — {gate_qual}</div>", unsafe_allow_html=True)
 
-        st.markdown("#### Model Feature Values (top 16)")
-        feat_vals = {}
-        for col in model_features[:16]:
-            v = float(dd_last.get(col, 0) or 0)
-            feat_vals[col.replace("feat_", "")] = round(v, 4)
-
-        feat_df = pd.DataFrame([feat_vals])
-        feat_fig = go.Figure(go.Heatmap(
-            z=feat_df.values, x=list(feat_vals.keys()), y=[""],
-            colorscale="RdYlGn", showscale=True,
-            text=[[f"{v:.3f}" for v in feat_df.values[0]]], texttemplate="%{text}",
-        ))
-        feat_fig.update_layout(
-            template="plotly_white", paper_bgcolor="#ffffff",
-            height=110, margin=dict(l=10, r=10, t=10, b=40),
-            font=dict(color="#334155"),
+        # ── Row 3: Chart (full width) ─────────────────────────────────
+        st.markdown("<div style='font-size:0.75rem;font-weight:700;color:#64748b;letter-spacing:.4px;margin:16px 0 8px'>PRICE CHART</div>", unsafe_allow_html=True)
+        dd_fig = make_chart(
+            dd_df, dd_symbol, lookback,
+            True, True, True, True,   # EMA9, EMA20, EMA50, EMA200 all on
+            show_bb, True, True, True, # BB from sidebar, Supertrend on, Pivots on, S/R on
+            model, model_features,
         )
-        st.plotly_chart(feat_fig, use_container_width=True)
+        st.plotly_chart(dd_fig, use_container_width=True)
 
-        st.markdown("#### Rolling BUY Probability (90 days)")
-        dd_trim = dd_df.tail(90 + 50).copy()
-        feat_matrix = np.column_stack(
-            [dd_trim.get(col, pd.Series(0, index=dd_trim.index)).fillna(0).values for col in model_features]
-        )
-        probs = model.predict_proba(feat_matrix)[:, 1]
-        dd_trim["prob"] = probs
-        dd_trim = dd_trim.tail(90)
-        dd_trim["DateTime"] = pd.to_datetime(dd_trim["DateTime"])
+        # ── Row 4: Rolling probability + Trade calculator ─────────────
+        prob_col, calc_col = st.columns([3, 2], gap="large")
 
-        prob_fig = go.Figure()
-        prob_fig.add_trace(go.Scatter(
-            x=dd_trim["DateTime"], y=dd_trim["prob"] * 100,
-            fill="tozeroy", fillcolor="rgba(22,163,74,0.1)",
-            line=dict(color="#16a34a", width=1.5), name="BUY prob %",
-        ))
-        prob_fig.add_hline(y=BUY_PROBA * 100, line_dash="dot",
-                           line_color="#16a34a", line_width=1.5,
-                           annotation_text=f"BUY threshold {BUY_PROBA*100:.0f}%",
-                           annotation_font_color="#16a34a")
-        prob_fig.update_layout(
-            template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
-            height=210, margin=dict(l=10, r=10, t=10, b=10),
-            yaxis_title="BUY%", yaxis_range=[0, 100],
-            font=dict(color="#334155"),
-        )
-        st.plotly_chart(prob_fig, use_container_width=True)
+        with prob_col:
+            st.markdown("<div style='font-size:0.75rem;font-weight:700;color:#64748b;letter-spacing:.4px;margin-bottom:8px'>ROLLING BUY PROBABILITY — 90 DAYS</div>", unsafe_allow_html=True)
+            dd_trim = dd_df.tail(90 + 50).copy()
+            feat_matrix = np.column_stack(
+                [dd_trim.get(col, pd.Series(0, index=dd_trim.index)).fillna(0).values for col in model_features]
+            )
+            probs = model.predict_proba(feat_matrix)[:, 1]
+            dd_trim["prob"] = probs
+            dd_trim = dd_trim.tail(90)
+            dd_trim["DateTime"] = pd.to_datetime(dd_trim["DateTime"])
+            cur_prob = float(dd_trim["prob"].iloc[-1]) * 100
+            avg_prob = float(dd_trim["prob"].mean()) * 100
 
-        st.markdown("#### Trade Risk Calculator")
-        rk1, rk2, rk3 = st.columns(3)
-        trade_capital = rk1.number_input("Capital (₹)", value=100000, step=10000, min_value=10000, key="rk_cap")
-        risk_pct      = rk2.slider("Risk per trade (%)", 0.5, 5.0, 1.0, 0.25, key="rk_pct")
-        custom_entry  = rk3.number_input("Entry price (₹)", value=float(round(dd_price, 1)), key="rk_entry")
+            prob_fig = go.Figure()
+            # Color-coded area: above threshold = green, below = amber
+            above = dd_trim["prob"] * 100
+            prob_fig.add_trace(go.Scatter(
+                x=dd_trim["DateTime"], y=above,
+                fill="tozeroy",
+                fillcolor="rgba(22,163,74,0.08)",
+                line=dict(color="#16a34a", width=2),
+                name="BUY prob %",
+                hovertemplate="<b>%{x|%d %b}</b><br>BUY prob: %{y:.1f}%<extra></extra>",
+            ))
+            prob_fig.add_hline(y=BUY_PROBA * 100, line_dash="dot",
+                               line_color="#16a34a", line_width=1.5,
+                               annotation_text=f"Threshold {BUY_PROBA*100:.0f}%",
+                               annotation_font_color="#16a34a", annotation_font_size=10)
+            prob_fig.add_hline(y=avg_prob, line_dash="dash",
+                               line_color="#94a3b8", line_width=1,
+                               annotation_text=f"90d avg {avg_prob:.1f}%",
+                               annotation_font_color="#94a3b8", annotation_font_size=10)
+            # Current value annotation
+            prob_fig.add_annotation(
+                x=dd_trim["DateTime"].iloc[-1], y=cur_prob,
+                text=f"<b>{cur_prob:.1f}%</b>",
+                showarrow=True, arrowhead=2,
+                font=dict(size=10, color="#16a34a" if cur_prob >= BUY_PROBA * 100 else "#dc2626"),
+                bgcolor="white", bordercolor="#e2e8f0", borderwidth=1,
+            )
+            prob_fig.update_layout(
+                template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                height=220, margin=dict(l=10, r=90, t=10, b=30),
+                yaxis=dict(title="", range=[0, 100], ticksuffix="%",
+                           tickfont=dict(size=9, color="#94a3b8"), gridcolor="#f1f5f9"),
+                xaxis=dict(tickfont=dict(size=9, color="#94a3b8"), gridcolor="#f1f5f9"),
+                showlegend=False,
+                font=dict(color="#334155", size=10),
+                hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0"),
+            )
+            st.plotly_chart(prob_fig, use_container_width=True)
 
-        stop_price    = custom_entry - 1.5 * dd_atr
-        target_price  = custom_entry + 3.0 * dd_atr
-        risk_amount   = trade_capital * risk_pct / 100
-        risk_per_share = custom_entry - stop_price
-        shares_calc   = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
-        invest_total  = shares_calc * custom_entry
-        potential     = shares_calc * (target_price - custom_entry)
+        with calc_col:
+            st.markdown("<div style='font-size:0.75rem;font-weight:700;color:#64748b;letter-spacing:.4px;margin-bottom:8px'>TRADE RISK CALCULATOR</div>", unsafe_allow_html=True)
+            rk1, rk2 = st.columns(2)
+            trade_capital = rk1.number_input("Capital (₹)", value=100000, step=10000, min_value=10000, key="rk_cap")
+            risk_pct      = rk2.slider("Risk %", 0.5, 5.0, 1.0, 0.25, key="rk_pct")
+            custom_entry  = st.number_input("Entry price (₹)", value=float(round(dd_price, 1)), key="rk_entry")
 
-        ra, rb, rc2, rd, re = st.columns(5)
-        ra.metric("Shares",        f"{shares_calc}")
-        rb.metric("Invested",      f"₹{invest_total:,.0f}")
-        rc2.metric("Stop",         f"₹{stop_price:,.1f}")
-        rd.metric("Target",        f"₹{target_price:,.1f}")
-        re.metric("Potential P&L", f"₹{potential:,.0f}", "R:R 1:2")
+            stop_price    = custom_entry - ATR_STOP_MULT  * dd_atr
+            target_price  = custom_entry + ATR_TARGET_MULT * dd_atr
+            risk_amount   = trade_capital * risk_pct / 100
+            risk_per_share = custom_entry - stop_price
+            shares_calc   = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+            invest_total  = shares_calc * custom_entry
+            potential_p   = shares_calc * (target_price - custom_entry)
+            pct_port      = invest_total / trade_capital * 100 if trade_capital > 0 else 0
+            rr            = ATR_TARGET_MULT / ATR_STOP_MULT
+
+            st.markdown(f"""
+<div class='card' style='padding:14px 16px'>
+  <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
+    <div style='text-align:center;padding:8px;background:#f8fafc;border-radius:8px'>
+      <div style='font-size:0.62rem;color:#94a3b8;font-weight:600'>SHARES</div>
+      <div style='font-size:1.1rem;font-weight:800;color:#1e293b'>{shares_calc}</div>
+    </div>
+    <div style='text-align:center;padding:8px;background:#f8fafc;border-radius:8px'>
+      <div style='font-size:0.62rem;color:#94a3b8;font-weight:600'>INVESTED</div>
+      <div style='font-size:1.1rem;font-weight:800;color:#1e293b'>₹{invest_total:,.0f}</div>
+      <div style='font-size:0.65rem;color:#64748b'>{pct_port:.1f}% of capital</div>
+    </div>
+    <div style='text-align:center;padding:8px;background:#fee2e2;border-radius:8px'>
+      <div style='font-size:0.62rem;color:#b91c1c;font-weight:600'>STOP LOSS</div>
+      <div style='font-size:1.1rem;font-weight:800;color:#dc2626'>₹{stop_price:,.1f}</div>
+      <div style='font-size:0.65rem;color:#b91c1c'>-₹{risk_amount:,.0f} max loss</div>
+    </div>
+    <div style='text-align:center;padding:8px;background:#dcfce7;border-radius:8px'>
+      <div style='font-size:0.62rem;color:#15803d;font-weight:600'>TARGET</div>
+      <div style='font-size:1.1rem;font-weight:800;color:#16a34a'>₹{target_price:,.1f}</div>
+      <div style='font-size:0.65rem;color:#15803d'>+₹{potential_p:,.0f} potential</div>
+    </div>
+  </div>
+  <div style='text-align:center;margin-top:10px;padding:6px;background:#f1f5f9;border-radius:6px'>
+    <span style='font-size:0.7rem;color:#64748b'>Reward:Risk = </span>
+    <span style='font-size:0.9rem;font-weight:800;color:#16a34a'>1 : {rr:.1f}</span>
+    <span style='font-size:0.7rem;color:#94a3b8'> &nbsp;({ATR_STOP_MULT}× / {ATR_TARGET_MULT}× ATR)</span>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # ── Row 5: Feature importance bar chart ───────────────────────
+        with st.expander("Model Feature Diagnostics", expanded=False):
+            st.markdown("<div style='font-size:0.72rem;color:#64748b;margin-bottom:8px'>Current feature values used by the XGBoost model. Green = bullish direction, red = bearish.</div>", unsafe_allow_html=True)
+            feat_vals = {}
+            for col in model_features[:20]:
+                v = float(dd_last.get(col, 0) or 0)
+                feat_vals[col.replace("feat_", "").replace("_", " ")] = round(v, 4)
+
+            bar_fig = go.Figure(go.Bar(
+                x=list(feat_vals.values()),
+                y=list(feat_vals.keys()),
+                orientation="h",
+                marker_color=["#16a34a" if v >= 0 else "#dc2626" for v in feat_vals.values()],
+                marker_opacity=0.75,
+                text=[f"{v:.3f}" for v in feat_vals.values()],
+                textposition="outside",
+                textfont=dict(size=9, color="#64748b"),
+            ))
+            bar_fig.update_layout(
+                template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                height=380, margin=dict(l=140, r=60, t=10, b=20),
+                xaxis=dict(gridcolor="#f1f5f9", tickfont=dict(size=9, color="#94a3b8")),
+                yaxis=dict(tickfont=dict(size=9, color="#334155")),
+                font=dict(color="#334155", size=10),
+            )
+            st.plotly_chart(bar_fig, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
