@@ -827,14 +827,19 @@ def make_chart(
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
-        margin=dict(l=10, r=100, t=44, b=10),
+        margin=dict(l=10, r=110, t=36, b=10),
         height=720,
         xaxis_rangeslider_visible=False,
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1, font=dict(size=10),
-                    bgcolor="rgba(255,255,255,0.85)",
-                    bordercolor="#e2e8f0", borderwidth=1),
+        legend=dict(
+            orientation="v",
+            yanchor="top", y=0.99,
+            xanchor="left", x=1.01,
+            font=dict(size=9, color="#64748b"),
+            bgcolor="rgba(255,255,255,0.9)",
+            bordercolor="#e2e8f0", borderwidth=1,
+            tracegroupgap=2,
+        ),
         font=dict(family="Inter, -apple-system, sans-serif", size=11, color="#334155"),
         title=dict(
             text=(f"<b style='color:#1e293b'>{symbol}</b>"
@@ -891,17 +896,16 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### Chart Overlays")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        show_ema9   = st.checkbox("EMA 9",   value=True)
-        show_ema20  = st.checkbox("EMA 20",  value=True)
-        show_ema50  = st.checkbox("EMA 50",  value=True)
-        show_ema200 = st.checkbox("EMA 200", value=True)
-    with col_b:
-        show_bb         = st.checkbox("Bollinger", value=False)
-        show_supertrend = st.checkbox("Supertrend",value=False)
-        show_pivots     = st.checkbox("Pivots",    value=True)
-        show_sr         = st.checkbox("S/R",       value=False)
+    ov1, ov2, ov3, ov4 = st.columns(4)
+    show_ema9   = ov1.checkbox("EMA9",  value=True)
+    show_ema20  = ov2.checkbox("EMA20", value=True)
+    show_ema50  = ov3.checkbox("EMA50", value=True)
+    show_ema200 = ov4.checkbox("EMA200",value=True)
+    ov5, ov6, ov7, ov8 = st.columns(4)
+    show_bb         = ov5.checkbox("BB",    value=False)
+    show_supertrend = ov6.checkbox("ST",    value=False)
+    show_pivots     = ov7.checkbox("Pivot", value=True)
+    show_sr         = ov8.checkbox("S/R",   value=False)
 
     st.markdown("---")
     st.markdown("#### Quick Filters")
