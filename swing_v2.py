@@ -1,5 +1,5 @@
 """
-swing_v2.py — Institutional-grade NSE swing trading model (v3.0).
+swing_v2.py — Institutional-grade NSE swing trading model (v3.1).
 
 Architecture v3.0 upgrades over v2.3:
   1. Market regime filter — Nifty 50/200 DMA + VIX: long entries only in BULL/SIDEWAYS
@@ -12,6 +12,14 @@ Architecture v3.0 upgrades over v2.3:
   8. Richer evaluation — yearly P&L, regime-segmented win rates, profit factor
   9. 28 features (4 new: ema20_ratio, ema50_ratio, dist_20d_high, return_60d)
  10. Default watchlist = full Nifty-50
+
+Architecture v3.1 upgrades (Phase 1 — faster indicators):
+ 11. feat_mfi            — Money Flow Index (price × volume, faster than RSI)
+ 12. feat_rsi_divergence — RSI vs price divergence (+1 bull / -1 bear)
+ 13. feat_price_accel    — Price acceleration (ROC of 5d ROC)
+ 14. feat_candle_pattern — Candle pattern score: engulfing / hammer / shooting-star
+ 15. feat_obv_slope      — OBV EMA5/EMA20 cross (accumulation momentum)
+     Total features: 33
 
 Commands:
     python swing_v2.py train       # retrain pooled XGBoost → models/swing_v2.pkl
@@ -83,6 +91,74 @@ def _cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) ->
     ma = tp.rolling(period).mean()
     md = (tp - ma).abs().rolling(period).mean()
     return (tp - ma) / (0.015 * md.replace(0, np.nan))
+
+
+def _mfi(high: pd.Series, low: pd.Series, close: pd.Series,
+         vol: pd.Series, period: int = 14) -> pd.Series:
+    """Money Flow Index — combines price movement and volume (faster than RSI alone)."""
+    tp  = (high + low + close) / 3
+    mf  = tp * vol
+    pos = mf.where(tp > tp.shift(1), 0.0).rolling(period).sum()
+    neg = mf.where(tp < tp.shift(1), 0.0).rolling(period).sum()
+    return 100 * pos / (pos + neg).replace(0, np.nan)
+
+
+def _rsi_divergence(close: pd.Series, rsi: pd.Series, window: int = 10) -> pd.Series:
+    """Detect RSI divergence.
+    +1 = bullish (price lower low, RSI higher low — potential reversal up)
+    -1 = bearish (price higher high, RSI lower high — potential reversal down)
+     0 = no divergence
+    """
+    def _slope(s: np.ndarray) -> float:
+        if len(s) < 2:
+            return 0.0
+        x = np.arange(len(s), dtype=float)
+        return float(np.polyfit(x, s, 1)[0])
+
+    price_slope = close.rolling(window).apply(_slope, raw=True)
+    rsi_slope   = rsi.rolling(window).apply(_slope, raw=True)
+    # Divergence: slopes have opposite signs
+    result = pd.Series(0.0, index=close.index)
+    bull = (price_slope < 0) & (rsi_slope > 0)
+    bear = (price_slope > 0) & (rsi_slope < 0)
+    result[bull] =  1.0
+    result[bear] = -1.0
+    return result
+
+
+def _candle_pattern(open_: pd.Series, high: pd.Series,
+                    low: pd.Series, close: pd.Series) -> pd.Series:
+    """Candle pattern score in [-1, +1].
+    +1 = strong bullish pattern (engulfing / hammer)
+    -1 = strong bearish pattern (engulfing / shooting star)
+     0 = no pattern
+    """
+    body      = close - open_
+    prev_body = body.shift(1)
+    hl        = (high - low).replace(0, np.nan)
+    lower_wick = (open_.combine(close, min) - low)  / hl
+    upper_wick = (high - open_.combine(close, max)) / hl
+    body_pct   = body.abs() / hl
+
+    bull_eng = (body > 0) & (prev_body < 0) & (body.abs() > prev_body.abs() * 1.1)
+    bear_eng = (body < 0) & (prev_body > 0) & (body.abs() > prev_body.abs() * 1.1)
+    hammer   = (body_pct < 0.35) & (lower_wick > 0.5)   # bullish reversal
+    shooting = (body_pct < 0.35) & (upper_wick > 0.5)   # bearish reversal
+
+    score = (bull_eng.astype(float)
+             + hammer.astype(float) * 0.6
+             - bear_eng.astype(float)
+             - shooting.astype(float) * 0.6)
+    return score.clip(-1.0, 1.0)
+
+
+def _obv_slope(close: pd.Series, vol: pd.Series,
+               fast: int = 5, slow: int = 20) -> pd.Series:
+    """OBV momentum: EMAfast / EMAslow - 1. Positive = accumulation accelerating."""
+    obv      = _obv(close, vol)
+    fast_ema = obv.ewm(span=fast,  adjust=False).mean()
+    slow_ema = obv.ewm(span=slow, adjust=False).mean().replace(0, np.nan)
+    return fast_ema / slow_ema - 1
 
 
 # =============================================================================
@@ -238,7 +314,7 @@ class PurgedTimeSeriesSplit:
 
 
 # =============================================================================
-# Feature engineering — 28 features
+# Feature engineering — 33 features (28 base + 5 faster indicators v3.1)
 # =============================================================================
 
 FEATURE_COLS = [
@@ -275,6 +351,12 @@ FEATURE_COLS = [
     "feat_return_10d",
     "feat_return_20d",
     "feat_return_60d",          # 60-day momentum  [v3.0]
+    # ── Phase 1: faster / leading indicators  [v3.1] ──────────────────
+    "feat_mfi",                 # Money Flow Index: price × volume pressure
+    "feat_rsi_divergence",      # RSI vs price divergence: +1 bull / -1 bear
+    "feat_price_accel",         # ROC acceleration: 5d ROC change over 5 days
+    "feat_candle_pattern",      # Engulfing / hammer / shooting-star score
+    "feat_obv_slope",           # OBV EMA5/EMA20 cross: accumulation momentum
 ]
 
 # Auxiliary market-regime columns — joined for gate/display use only; NOT in
@@ -291,7 +373,7 @@ MARKET_AUX_COLS = [
 
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute all 28 features from OHLCV. Returns df with feat_* columns."""
+    """Compute all 33 features from OHLCV. Returns df with feat_* columns."""
     df = df.copy()
     close, high, low, vol, op = df["Close"], df["High"], df["Low"], df["Volume"], df["Open"]
 
@@ -353,6 +435,15 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["feat_return_10d"] = close.pct_change(10)
     df["feat_return_20d"] = close.pct_change(20)
     df["feat_return_60d"] = close.pct_change(60)    # [v3.0] 60-day momentum
+
+    # ── Phase 1: faster / leading indicators  [v3.1] ──────────────────
+    rsi_series = df["feat_rsi"]
+    df["feat_mfi"]           = _mfi(high, low, close, vol, 14) / 100
+    df["feat_rsi_divergence"]= _rsi_divergence(close, rsi_series, window=10)
+    roc_5                    = close.pct_change(5)
+    df["feat_price_accel"]   = (roc_5 - roc_5.shift(5)).clip(-0.15, 0.15)
+    df["feat_candle_pattern"]= _candle_pattern(op, high, low, close)
+    df["feat_obv_slope"]     = _obv_slope(close, vol, fast=5, slow=20).clip(-0.5, 0.5)
 
     return df
 
