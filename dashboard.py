@@ -905,6 +905,14 @@ nifty_50dma  = latest_mkt.get("nifty_50dma",  0)
 nifty_200dma = latest_mkt.get("nifty_200dma", 0)
 vix_raw      = latest_mkt.get("feat_vix_level", 0.15) * 100
 mkt_ret_1d   = latest_mkt.get("feat_market_return_1d", 0) * 100
+mkt_data_ok  = nifty_close > 0
+
+# Display strings — show N/A when market fetch returned zeros
+_nifty_str  = f"{nifty_close:,.0f}" if mkt_data_ok else "N/A"
+_dma50_str  = f"{nifty_50dma:,.0f}" if mkt_data_ok else "N/A"
+_dma200_str = f"{nifty_200dma:,.0f}" if mkt_data_ok else "N/A"
+_chg_str    = f"{mkt_ret_1d:+.2f}%" if mkt_data_ok else ""
+_vix_str    = f"{vix_raw:.1f}" if mkt_data_ok else "N/A"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -925,30 +933,32 @@ st.markdown(f"""
   <div style='flex:1'></div>
   <div style='text-align:center'>
     <div style='font-size:0.68rem;color:#64748b;font-weight:600'>NIFTY 50</div>
-    <div style='font-size:1.1rem;font-weight:700;color:#1e293b'>{nifty_close:,.0f}
-      <span style='color:{chg_color};font-size:0.9rem'>{mkt_ret_1d:+.2f}%</span>
+    <div style='font-size:1.1rem;font-weight:700;color:#1e293b'>{_nifty_str}
+      <span style='color:{chg_color};font-size:0.9rem'>{_chg_str}</span>
     </div>
   </div>
   <div style='text-align:center'>
     <div style='font-size:0.68rem;color:#64748b;font-weight:600'>REGIME</div>
-    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{regime_icon} {regime_label}</div>
+    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{regime_icon} {regime_label}{"*" if not mkt_data_ok else ""}</div>
   </div>
   <div style='text-align:center'>
     <div style='font-size:0.68rem;color:#64748b;font-weight:600'>VIX</div>
-    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{vix_icon} {vix_raw:.1f}</div>
+    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{vix_icon} {_vix_str}</div>
   </div>
   <div style='text-align:center'>
     <div style='font-size:0.68rem;color:#64748b;font-weight:600'>EMA50</div>
-    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{nifty_50dma:,.0f}</div>
+    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{_dma50_str}</div>
   </div>
   <div style='text-align:center'>
     <div style='font-size:0.68rem;color:#64748b;font-weight:600'>EMA200</div>
-    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{nifty_200dma:,.0f}</div>
+    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{_dma200_str}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-if trend_regime == "BEAR":
+if not mkt_data_ok:
+    st.warning("⚠️ Market data unavailable (^NSEI fetch failed) — regime shown is fallback SIDEWAYS. Refresh to retry.")
+elif trend_regime == "BEAR":
     st.warning("⚠️ Bear regime active — new long entries blocked. Scores shown for monitoring only.")
 elif vol_regime in ("HIGH", "EXTREME"):
     st.warning(f"⚠️ VIX elevated ({vix_raw:.1f}) — reduce position sizes.")
@@ -1061,9 +1071,18 @@ with tab1:
             st.info("No scan data — model may need retraining.")
         else:
             sig_counts = scan_df["Signal"].value_counts()
+            _sig_colors = {"BUY":"#16a34a","WATCH":"#ca8a04","HOLD":"#64748b","SELL":"#dc2626"}
+            _sig_bg     = {"BUY":"#dcfce7","WATCH":"#fef9c3","HOLD":"#f1f5f9","SELL":"#fee2e2"}
             b1, b2, b3, b4 = st.columns(4)
-            for col_m, sig, icon in [(b1,"BUY","🟢"),(b2,"WATCH","🟡"),(b3,"HOLD","⚪"),(b4,"SELL","🔴")]:
-                col_m.metric(f"{icon} {sig}", sig_counts.get(sig, 0))
+            for col_m, sig in [(b1,"BUY"),(b2,"WATCH"),(b3,"HOLD"),(b4,"SELL")]:
+                n = sig_counts.get(sig, 0)
+                col_m.markdown(
+                    f"<div style='background:{_sig_bg[sig]};border:1px solid {_sig_colors[sig]}33;"
+                    f"border-radius:10px;padding:10px 6px;text-align:center'>"
+                    f"<div style='font-size:1.4rem;font-weight:800;color:{_sig_colors[sig]}'>{n}</div>"
+                    f"<div style='font-size:0.72rem;font-weight:600;color:{_sig_colors[sig]}'>{sig}</div>"
+                    f"</div>", unsafe_allow_html=True
+                )
 
             show_cols = ["Symbol","Price","1D%","Signal","Grade","BUY%","Confs","RSI"]
 
