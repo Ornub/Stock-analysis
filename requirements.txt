@@ -1,0 +1,7 @@
+jugaad-data
+yfinance
+pandas
+numpy
+requests
+xgboost
+scikit-learn
