@@ -31,6 +31,7 @@ from swing_v2 import (
     GRADE_A_MIN, GRADE_B_MIN, GRADE_C_MIN,
     ATR_STOP_MULT, ATR_TARGET_MULT, ATR_TRAIL_MULT,
     TOP_N_CANDIDATES, SECTOR_MAP,
+    VIX_VERY_HIGH,
 )
 from stock_fetcher import fetch_historical_data
 
@@ -263,6 +264,9 @@ def run_scan() -> pd.DataFrame:
     ranked_set = set(ranked)
     regime_blocked = trend_regime == "BEAR"
 
+    _mkt_last = market.sort_values("DateTime").iloc[-1] if market is not None and not market.empty else {}
+    latest_mkt_vix = float(_mkt_last.get("feat_vix_level", 0.15) if hasattr(_mkt_last, "get") else 0.15) * 100
+
     rows = []
     for sym, df in symbol_data.items():
         latest = df.iloc[-1]
@@ -332,11 +336,28 @@ def run_scan() -> pd.DataFrame:
             "Target":   target,
             "Passed":   ", ".join(passed),
             "Blockers": ", ".join(failed[:3]) if signal == "WATCH" else "",
+            "RSI_warn":  signal == "BUY" and rsi > 70,
+            "ATR_warn":  signal == "BUY" and (atr / price > 0.025 if price > 0 else False),
+            "WeakBUY":   signal == "BUY" and grade == "C" and rsi > 65 and vol_r < 1.3,
         })
 
     df_out = pd.DataFrame(rows)
     if df_out.empty:
         return df_out
+
+    # VIX extreme override — engine spec: halt new longs when VIX > VIX_VERY_HIGH
+    vix_now = latest_mkt_vix  # captured before loop
+    if vix_now > VIX_VERY_HIGH:
+        mask_buy   = df_out["Signal"] == "BUY"
+        mask_watch = df_out["Signal"] == "WATCH"
+        df_out.loc[mask_buy,   "Signal"]   = "WATCH"
+        df_out.loc[mask_buy,   "Blockers"] = df_out.loc[mask_buy, "Blockers"].apply(
+            lambda b: f"VIX Extreme ({vix_now:.1f})" + (f", {b}" if b else ""))
+        df_out.loc[mask_watch, "Signal"]   = "HOLD"
+        df_out.loc[mask_watch, "Blockers"] = df_out.loc[mask_watch, "Blockers"].apply(
+            lambda b: f"VIX Extreme ({vix_now:.1f})" + (f", {b}" if b else ""))
+
+    df_out["ScanTime"] = datetime.now().strftime("%H:%M")
     sig_ord = {"BUY": 0, "WATCH": 1, "HOLD": 2, "SELL": 3}
     df_out["_s"] = df_out["Signal"].map(sig_ord).fillna(4)
     return df_out.sort_values(["_s", "BUY%"], ascending=[True, False]).drop(columns=["_s"]).reset_index(drop=True)
@@ -390,6 +411,9 @@ def explain_signal(signal: str, passed: str, blockers: str, buy_pct: float, grad
     breakout  = "Breakout" in parts
     vol_ok    = "Volume" in parts
 
+    all_gates = ["EMA200", "EMA50", "EMA20", "ADX", "MACD", "Breakout", "Volume"]
+    failed_gates = [g for g in all_gates if g not in parts]
+
     if signal == "BUY":
         base = "Uptrend confirmed"
         if trend_ok:
@@ -400,13 +424,15 @@ def explain_signal(signal: str, passed: str, blockers: str, buy_pct: float, grad
             base += ", near 20-day high"
         if vol_ok:
             base += " with volume expansion"
-        base += f". Model confidence {buy_pct:.0f}%, Grade {grade}."
+        base += f". Confidence {buy_pct:.0f}%, Grade {grade}."
+        if grade != "A" and failed_gates:
+            base += f" Failed gates: {', '.join(failed_gates)}."
         return base
     elif signal == "WATCH":
         base = f"Model score {buy_pct:.0f}% is bullish"
         if blk:
-            base += f", but blocked by: {', '.join(blk)}"
-        base += ". Wait for gate confirmation before entering."
+            base += f", but {len(blk)} gate(s) failed: {', '.join(blk)}"
+        base += ". Observe only — do not prepare entry until conditions improve."
         return base
     elif signal == "SELL":
         return "Bearish model score. Price structure weakening — avoid new longs."
@@ -456,9 +482,11 @@ def classify_stock_state(latest) -> dict:
     else:
         volatility = ("Low", "pill-green")
 
-    # State
-    if dist_20d > 0 and vol_ratio >= VOLUME_THRESHOLD:
+    # State — breakout only valid with genuine volume expansion (>=1.5x avg)
+    if dist_20d > 0 and vol_ratio >= 1.5:
         state = ("Breakout", "pill-green")
+    elif dist_20d > 0 and vol_ratio >= VOLUME_THRESHOLD:
+        state = ("Thin breakout", "pill-yellow")
     elif rsi > 65 and dist_20d > 0:
         state = ("Overbought", "pill-yellow")
     elif rsi < 35:
@@ -921,9 +949,32 @@ with tab1:
             (filtered_df["RSI"] >= rsi_range[0]) & (filtered_df["RSI"] <= rsi_range[1])
         ]
 
+    # ── Scan age indicator ───────────────────────────────────────────
+    if not scan_df.empty and "ScanTime" in scan_df.columns:
+        try:
+            scan_time_str = scan_df["ScanTime"].iloc[0]
+            scan_dt = datetime.now().replace(
+                hour=int(scan_time_str.split(":")[0]),
+                minute=int(scan_time_str.split(":")[1]),
+                second=0, microsecond=0,
+            )
+            scan_age_min = max(0, int((datetime.now() - scan_dt).total_seconds() // 60))
+            age_color = "#dc2626" if scan_age_min > 10 else ("#ca8a04" if scan_age_min > 5 else "#64748b")
+            st.markdown(
+                f"<div style='text-align:right;font-size:0.72rem;color:{age_color};margin-bottom:4px'>"
+                f"Scan: {scan_time_str}"
+                f"{'  ⚠ ' + str(scan_age_min) + ' min old — prices may have moved' if scan_age_min > 10 else ''}"
+                f"</div>", unsafe_allow_html=True
+            )
+        except Exception:
+            pass
+
     # ── Top 3 Actionable Signals ─────────────────────────────────────
     if not scan_df.empty:
-        top3 = scan_df[scan_df["Signal"] == "BUY"].head(3)
+        _buys = scan_df[scan_df["Signal"] == "BUY"].copy()
+        # quality filter: exclude overbought entries and thin-volume breakouts
+        _buys_filtered = _buys[(_buys["RSI"] <= 72) & (_buys["VolRatio"] >= 1.3)]
+        top3 = _buys_filtered.head(3) if not _buys_filtered.empty else _buys.head(3)
         if top3.empty:
             top3 = scan_df[scan_df["Signal"] == "WATCH"].head(3)
 
@@ -938,8 +989,13 @@ with tab1:
                 conf_w = int(row["BUY%"])
                 expl  = explain_signal(sig, row.get("Passed",""), row.get("Blockers",""),
                                         row["BUY%"], grade)
-                stop_s  = f"<br><span style='color:#64748b;font-size:0.75rem'>Stop ₹{row['Stop']:,.1f}</span>" if pd.notna(row.get("Stop")) else ""
-                tgt_s   = f" · Target ₹{row['Target']:,.1f}" if pd.notna(row.get("Target")) else ""
+                stop_s   = f"<br><span style='color:#64748b;font-size:0.75rem'>Stop ₹{row['Stop']:,.1f}</span>" if pd.notna(row.get("Stop")) else ""
+                tgt_s    = f" · Target ₹{row['Target']:,.1f}" if pd.notna(row.get("Target")) else ""
+                warn_tags = ""
+                if row.get("RSI_warn"):
+                    warn_tags += "<span style='font-size:0.68rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:1px 6px;margin-right:4px'>⚠ RSI>70</span>"
+                if row.get("ATR_warn"):
+                    warn_tags += "<span style='font-size:0.68rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 6px'>⚠ Wide ATR</span>"
                 col.markdown(f"""
 <div class='top-signal-card' style='border-top: 3px solid {color}'>
   <div style='display:flex;justify-content:space-between;align-items:center'>
@@ -957,6 +1013,7 @@ with tab1:
     </div>
   </div>
   {stop_s}{tgt_s}
+  {warn_tags}
   <div style='font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4'>{expl}</div>
 </div>""", unsafe_allow_html=True)
 
@@ -1091,6 +1148,16 @@ with tab1:
                     stop_s = f"Stop <b>₹{sr['Stop']:,.1f}</b> &nbsp;" if pd.notna(sr.get("Stop")) else ""
                     tgt_s  = f"Target <b>₹{sr['Target']:,.1f}</b>" if pd.notna(sr.get("Target")) else ""
                     pass_s = f"<span style='font-size:0.72rem;color:#64748b'>Gates: {sr['Passed']}</span>" if sr.get("Passed") else ""
+                    risk_tags = ""
+                    if sr.get("RSI_warn"):
+                        risk_tags += "<span style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ RSI >70 — overbought entry</span>"
+                    if sr.get("ATR_warn"):
+                        risk_tags += "<span style='font-size:0.7rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ High ATR — stop wider than normal</span>"
+                    if sr.get("WeakBUY"):
+                        risk_tags += "<span style='font-size:0.7rem;background:#f1f5f9;color:#64748b;border-radius:4px;padding:1px 7px'>Grade C + RSI>65 + low volume — HOLD is acceptable</span>"
+                    sideways_note = ""
+                    if trend_regime == "SIDEWAYS" and sig == "BUY":
+                        sideways_note = "<div style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:3px 8px;margin-top:4px'>⚠ Sideways regime — lower signal reliability, tighten stop</div>"
                     st.markdown(f"""
 <div class='card' style='border-left:4px solid {color};margin-bottom:8px;background:{bg}20'>
   <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>
@@ -1100,6 +1167,8 @@ with tab1:
   </div>
   <div style='font-size:0.78rem;color:#475569;margin-bottom:4px'>{expl}</div>
   {pass_s}
+  {risk_tags}
+  {sideways_note}
 </div>""", unsafe_allow_html=True)
 
             fig = make_chart(
@@ -1210,8 +1279,16 @@ with tab2:
                 st.error("Could not size positions. Check stop-loss levels.")
             else:
                 port_df = pd.DataFrame(portfolio_rows)
-                deployed_pct = total_invested / capital * 100
+                deployed_pct   = total_invested / capital * 100
                 risk_pct_total = total_risk / capital * 100
+
+                # Sector concentration check
+                from collections import Counter
+                sector_counts = Counter(r["Sector"] for r in portfolio_rows if r["Sector"])
+                overweight = [(sec, n) for sec, n in sector_counts.items() if n >= 2]
+                if overweight:
+                    warn_parts = ", ".join(f"{sec} ×{n}" for sec, n in overweight)
+                    st.warning(f"⚠ Sector concentration: {warn_parts} — correlated drawdown risk if sector declines.")
 
                 st.markdown(f"""
 <div class='card card-accent-green' style='margin-bottom:12px'>
@@ -1406,8 +1483,9 @@ with tab4:
             icon  = "✅" if passed else "❌"
             bg    = "#dcfce7" if passed else "#fee2e2"
             color = "#15803d" if passed else "#b91c1c"
+            border_col = "#86efac" if passed else "#fca5a5"
             g_cols[i].markdown(
-                f"<div style='background:{bg};border:1px solid {"#86efac" if passed else "#fca5a5"};border-radius:10px;"
+                f"<div style='background:{bg};border:1px solid {border_col};border-radius:10px;"
                 f"text-align:center;padding:10px 4px'>"
                 f"<div style='font-size:1.3rem'>{icon}</div>"
                 f"<div style='font-size:0.65rem;color:{color};font-weight:600;line-height:1.3'>{label}</div>"
