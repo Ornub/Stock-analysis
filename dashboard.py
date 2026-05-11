@@ -634,17 +634,17 @@ def make_chart(
 
     fig = make_subplots(
         rows=4, cols=1, shared_xaxes=True,
-        row_heights=[0.55, 0.15, 0.15, 0.15],
-        vertical_spacing=0.012,
-        subplot_titles=("", "Volume", "RSI-14", "MACD"),
+        row_heights=[0.58, 0.14, 0.14, 0.14],
+        vertical_spacing=0.018,
     )
 
     # Candlestick
     fig.add_trace(go.Candlestick(
         x=dt, open=df["Open"], high=h, low=lo, close=c,
         increasing_line_color=C["bull"], decreasing_line_color=C["bear"],
-        increasing_fillcolor=C["bull"],  decreasing_fillcolor=C["bear"],
-        name="OHLC", showlegend=False, whiskerwidth=0.6,
+        increasing_fillcolor="#bbf7d0",  decreasing_fillcolor="#fecaca",
+        name="OHLC", showlegend=False, whiskerwidth=0.4,
+        line=dict(width=1),
     ), row=1, col=1)
 
     # Bollinger Bands
@@ -740,23 +740,25 @@ def make_chart(
         ph = float(h.iloc[-2]); pl = float(lo.iloc[-2]); pc = float(c.iloc[-2])
         pv = pivot_levels(ph, pl, pc)
         for lbl, lvl, col, dash in [
-            ("R2", pv["R2"], "rgba(220,38,38,0.45)", "dot"),
-            ("R1", pv["R1"], "rgba(220,38,38,0.75)", "dash"),
-            ("P",  pv["P"],  "rgba(100,116,139,0.8)", "solid"),
-            ("S1", pv["S1"], "rgba(22,163,74,0.75)", "dash"),
-            ("S2", pv["S2"], "rgba(22,163,74,0.45)", "dot"),
+            ("R2", pv["R2"], "rgba(220,38,38,0.40)", "dot"),
+            ("R1", pv["R1"], "rgba(220,38,38,0.70)", "dash"),
+            ("P",  pv["P"],  "rgba(100,116,139,0.75)", "solid"),
+            ("S1", pv["S1"], "rgba(22,163,74,0.70)", "dash"),
+            ("S2", pv["S2"], "rgba(22,163,74,0.40)", "dot"),
         ]:
             fig.add_hline(y=lvl, line_dash=dash, line_color=col, line_width=1,
-                          annotation_text=f"{lbl} {lvl:,.0f}", annotation_font_color=col,
-                          annotation_position="left", row=1, col=1)
+                          annotation_text=f"{lbl} {lvl:,.0f}",
+                          annotation_font_size=9, annotation_font_color=col,
+                          annotation_position="right", row=1, col=1)
 
     # Volume
     vol_colors = [C["bull"] if cl >= op else C["bear"]
                   for cl, op in zip(df["Close"], df["Open"])]
     fig.add_trace(go.Bar(x=dt, y=vol, name="Volume",
-                         marker_color=vol_colors, opacity=0.75, showlegend=False), row=2, col=1)
+                         marker_color=vol_colors, opacity=0.55,
+                         showlegend=False, marker_line_width=0), row=2, col=1)
     fig.add_trace(go.Scatter(x=dt, y=vol.rolling(20).mean(), name="Vol MA20",
-                             line=dict(color=C["ema50"], width=1), showlegend=False), row=2, col=1)
+                             line=dict(color="#0ea5e9", width=1.2), showlegend=False), row=2, col=1)
 
     # RSI
     delta = c.diff()
@@ -778,12 +780,46 @@ def make_chart(
     hist   = macd_l - sig_l
     hist_colors = [C["macd_h+"] if v >= 0 else C["macd_h-"] for v in hist.fillna(0)]
     fig.add_trace(go.Bar(x=dt, y=hist, name="Hist", marker_color=hist_colors,
-                         opacity=0.75, showlegend=False), row=4, col=1)
+                         opacity=0.6, showlegend=False), row=4, col=1)
     fig.add_trace(go.Scatter(x=dt, y=macd_l, name="MACD",
                              line=dict(color=C["macd_ln"], width=1.5), showlegend=False), row=4, col=1)
     fig.add_trace(go.Scatter(x=dt, y=sig_l, name="Signal",
                              line=dict(color=C["sig_ln"], width=1, dash="dot"), showlegend=False), row=4, col=1)
-    fig.add_hline(y=0, line_color="rgba(100,116,139,0.3)", line_width=1, row=4, col=1)
+    fig.add_hline(y=0, line_color="rgba(100,116,139,0.25)", line_width=1, row=4, col=1)
+
+    # Current-value labels on right edge for RSI and MACD
+    cur_rsi  = float(rsi.iloc[-1])  if not rsi.isna().all()   else 50.0
+    cur_macd = float(macd_l.iloc[-1]) if not macd_l.isna().all() else 0.0
+    rsi_col  = C["bear"] if cur_rsi >= 70 else (C["bull"] if cur_rsi <= 30 else C["rsi_ln"])
+    macd_col = C["macd_h+"] if cur_macd >= 0 else C["macd_h-"]
+
+    for ann_row, ann_y, ann_text, ann_col, ann_ref in [
+        (3, cur_rsi,  f"<b>{cur_rsi:.1f}</b>",  rsi_col,  "y3"),
+        (4, cur_macd, f"<b>{cur_macd:.2f}</b>", macd_col, "y4"),
+    ]:
+        fig.add_annotation(
+            x=1, y=ann_y, xref="paper", yref=ann_ref,
+            text=ann_text, showarrow=False,
+            font=dict(size=9, color=ann_col),
+            xanchor="left", align="left",
+            bgcolor="rgba(255,255,255,0.85)",
+            bordercolor=ann_col, borderwidth=1, borderpad=2,
+        )
+
+    # Small panel labels (top-left of each sub-panel)
+    for ann_row, ann_ref, ann_text in [
+        (2, "y2", "VOL"),
+        (3, "y3", "RSI 14"),
+        (4, "y4", "MACD"),
+    ]:
+        fig.add_annotation(
+            x=0, y=1, xref="paper", yref=f"{ann_ref} domain",
+            text=f"<span style='font-size:8px'>{ann_text}</span>",
+            showarrow=False,
+            font=dict(size=8, color="#94a3b8"),
+            xanchor="left", yanchor="top",
+            bgcolor="rgba(255,255,255,0)",
+        )
 
     # Layout
     signal_color = C["bull"] if show_buy_levels else (C["bear"] if show_sell_levels else "#64748b")
@@ -791,30 +827,40 @@ def make_chart(
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
-        margin=dict(l=10, r=140, t=44, b=10),
+        margin=dict(l=10, r=100, t=44, b=10),
         height=720,
         xaxis_rangeslider_visible=False,
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1, font=dict(size=10),
-                    bgcolor="rgba(255,255,255,0.8)"),
+                    bgcolor="rgba(255,255,255,0.85)",
+                    bordercolor="#e2e8f0", borderwidth=1),
         font=dict(family="Inter, -apple-system, sans-serif", size=11, color="#334155"),
         title=dict(
             text=(f"<b style='color:#1e293b'>{symbol}</b>"
                   f"  <span style='color:#334155'>₹{last_price:,.1f}</span>"
-                  f"  <span style='color:{signal_color};font-weight:700'>{signal_label}</span>"
-                  f"  <span style='color:#64748b;font-size:11px'>BUY% {last_buy_p*100:.1f} · Confs {last_conf}/7</span>"),
+                  f"  <span style='color:{signal_color};font-weight:700'> {signal_label}</span>"
+                  f"  <span style='color:#94a3b8;font-size:10px'>  BUY% {last_buy_p*100:.0f} · {last_conf}/7 gates</span>"),
             x=0.01, font=dict(size=14),
         ),
+        hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0",
+                        font=dict(size=11, color="#1e293b")),
     )
-    fig.update_xaxes(gridcolor=C["grid"], showgrid=True, zeroline=False,
-                     linecolor="#e2e8f0", tickfont=dict(color="#64748b"))
-    fig.update_yaxes(gridcolor=C["grid"], showgrid=True, zeroline=False,
-                     linecolor="#e2e8f0", tickfont=dict(color="#64748b"))
-    fig.update_yaxes(title_text="₹ Price", title_font_color="#64748b", row=1, col=1)
-    fig.update_yaxes(title_text="Vol",     title_font_color="#64748b", row=2, col=1)
-    fig.update_yaxes(title_text="RSI",     title_font_color="#64748b", row=3, col=1, range=[0, 100])
-    fig.update_yaxes(title_text="MACD",    title_font_color="#64748b", row=4, col=1)
+    fig.update_xaxes(
+        gridcolor=C["grid"], showgrid=True, zeroline=False,
+        linecolor="#e2e8f0", tickfont=dict(color="#94a3b8", size=10),
+        showticklabels=False,  # hide on all rows except bottom
+    )
+    fig.update_xaxes(showticklabels=True, tickfont=dict(color="#94a3b8", size=10), row=4, col=1)
+    fig.update_yaxes(
+        gridcolor=C["grid"], showgrid=True, zeroline=False,
+        linecolor="#e2e8f0", tickfont=dict(color="#94a3b8", size=10),
+        ticklen=3,
+    )
+    fig.update_yaxes(title_text="", row=1, col=1, tickformat=",.0f")
+    fig.update_yaxes(title_text="", row=2, col=1, tickformat=".2s")
+    fig.update_yaxes(title_text="", row=3, col=1, range=[0, 100], dtick=20)
+    fig.update_yaxes(title_text="", row=4, col=1)
     return fig
 
 
