@@ -233,7 +233,10 @@ def get_stock_data(symbol: str, lookback_days: int) -> pd.DataFrame | None:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_market_data():
-    return _fetch_market_regime(5)
+    try:
+        return _fetch_market_regime(5)
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1017,11 +1020,16 @@ with tab1:
         # quality filter: exclude overbought entries and thin-volume breakouts
         _buys_filtered = _buys[(_buys["RSI"] <= 72) & (_buys["VolRatio"] >= 1.3)]
         top3 = _buys_filtered.head(3) if not _buys_filtered.empty else _buys.head(3)
-        if top3.empty:
+        _top3_is_watch = top3.empty
+        if _top3_is_watch:
             top3 = scan_df[scan_df["Signal"] == "WATCH"].head(3)
 
         if not top3.empty:
-            st.markdown("#### Top Signals Today")
+            if _top3_is_watch:
+                st.markdown("#### Best Watch Candidates")
+                st.caption("No qualifying BUY signals today — showing highest-conviction WATCH setups.")
+            else:
+                st.markdown("#### Top BUY Signals Today")
             t_cols = st.columns(len(top3))
             for col, (_, row) in zip(t_cols, top3.iterrows()):
                 sig   = row["Signal"]
