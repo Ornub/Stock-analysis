@@ -1113,33 +1113,134 @@ with tab1:
   <div style='font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4'>{expl}</div>
 </div>""", unsafe_allow_html=True)
 
+    # ── Signal count summary row (full width) ────────────────────────
+    if not scan_df.empty:
+        sig_counts = scan_df["Signal"].value_counts()
+        _sig_colors = {"BUY":"#16a34a","WATCH":"#ca8a04","HOLD":"#64748b","SELL":"#dc2626"}
+        _sig_bg     = {"BUY":"#dcfce7","WATCH":"#fef9c3","HOLD":"#f1f5f9","SELL":"#fee2e2"}
+        _cnt_cols = st.columns([1, 1, 1, 1, 6])
+        for col_m, sig in zip(_cnt_cols[:4], ["BUY","WATCH","HOLD","SELL"]):
+            n = sig_counts.get(sig, 0)
+            col_m.markdown(
+                f"<div style='background:{_sig_bg[sig]};border:1px solid {_sig_colors[sig]}33;"
+                f"border-radius:10px;padding:10px 6px;text-align:center'>"
+                f"<div style='font-size:1.4rem;font-weight:800;color:{_sig_colors[sig]}'>{n}</div>"
+                f"<div style='font-size:0.72rem;font-weight:600;color:{_sig_colors[sig]}'>{sig}</div>"
+                f"</div>", unsafe_allow_html=True
+            )
+
     st.markdown("")
 
-    # ── Main layout: table | chart ────────────────────────────────────
-    left_col, right_col = st.columns([1.1, 2.7], gap="medium")
+    # ── Watchlist chips (full width) ──────────────────────────────────
+    if st.session_state.watchlist:
+        wl_display = st.columns(len(st.session_state.watchlist))
+        for wl_c, sym in zip(wl_display, st.session_state.watchlist):
+            if not scan_df.empty:
+                row_m = scan_df[scan_df["Symbol"] == sym]
+                sig_m   = row_m.iloc[0]["Signal"] if not row_m.empty else "HOLD"
+                price_m = row_m.iloc[0]["Price"]  if not row_m.empty else 0
+                chg_m   = row_m.iloc[0]["1D%"]    if not row_m.empty else 0
+                col_m   = SIGNAL_COLORS.get(sig_m,"#64748b")
+                wl_c.markdown(f"""
+<div style='background:#fff;border:1px solid #e2e8f0;border-top:3px solid {col_m};
+     border-radius:8px;padding:7px 10px;text-align:center;cursor:pointer'>
+  <div style='font-weight:700;font-size:0.82rem;color:#1e293b'>{sym}</div>
+  <div style='font-size:0.78rem;color:#334155'>₹{price_m:,.0f}</div>
+  <div style='font-size:0.72rem;color:{col_m}'>{sig_m}</div>
+  <div style='font-size:0.7rem;color:{"#16a34a" if chg_m>=0 else "#dc2626"}'>{chg_m:+.1f}%</div>
+</div>""", unsafe_allow_html=True)
 
-    with left_col:
-        st.markdown("#### Signal Scan")
+    st.markdown(f"#### {selected_symbol}")
 
-        if scan_df.empty:
-            st.info("No scan data — model may need retraining.")
-        else:
-            sig_counts = scan_df["Signal"].value_counts()
-            _sig_colors = {"BUY":"#16a34a","WATCH":"#ca8a04","HOLD":"#64748b","SELL":"#dc2626"}
-            _sig_bg     = {"BUY":"#dcfce7","WATCH":"#fef9c3","HOLD":"#f1f5f9","SELL":"#fee2e2"}
-            b1, b2, b3, b4 = st.columns(4)
-            for col_m, sig in [(b1,"BUY"),(b2,"WATCH"),(b3,"HOLD"),(b4,"SELL")]:
-                n = sig_counts.get(sig, 0)
-                col_m.markdown(
-                    f"<div style='background:{_sig_bg[sig]};border:1px solid {_sig_colors[sig]}33;"
-                    f"border-radius:10px;padding:10px 6px;text-align:center'>"
-                    f"<div style='font-size:1.4rem;font-weight:800;color:{_sig_colors[sig]}'>{n}</div>"
-                    f"<div style='font-size:0.72rem;font-weight:600;color:{_sig_colors[sig]}'>{sig}</div>"
-                    f"</div>", unsafe_allow_html=True
-                )
+    with st.spinner(f"Loading {selected_symbol}…"):
+        stock_df = get_stock_data(selected_symbol, lookback + 250)
 
-            show_cols = ["Symbol","Price","1D%","Signal","Grade","BUY%","Confs","RSI"]
+    if stock_df is None or stock_df.empty:
+        st.error(f"No data available for {selected_symbol}.")
+    else:
+        last_row   = stock_df.iloc[-1]
+        prev_row   = stock_df.iloc[-2] if len(stock_df) >= 2 else last_row
+        last_price = float(last_row["Close"])
+        day_chg    = (last_price / float(prev_row["Close"]) - 1) * 100
+        week_chg   = (last_price / float(stock_df.iloc[-6]["Close"]) - 1) * 100 if len(stock_df) >= 6 else 0
+        month_chg  = (last_price / float(stock_df.iloc[-22]["Close"]) - 1) * 100 if len(stock_df) >= 22 else 0
+        high52     = float(stock_df["High"].tail(252).max())
+        low52      = float(stock_df["Low"].tail(252).min())
+        pct_from_hi = (last_price / high52 - 1) * 100
+        atr_val    = float(last_row.get("ATR", 0) or 0)
+        rsi_val    = float(last_row.get("feat_rsi", 50) or 50)
+        adx_val    = float(last_row.get("feat_adx", 0) or 0) * 100
+        vol_ratio  = float(last_row.get("feat_volume_ratio", 1) or 1)
 
+        sc = st.columns(8)
+        sc[0].metric("Price",    f"₹{last_price:,.1f}", f"{day_chg:+.2f}%")
+        sc[1].metric("1W",       f"{week_chg:+.2f}%")
+        sc[2].metric("1M",       f"{month_chg:+.2f}%")
+        sc[3].metric("52W High", f"₹{high52:,.0f}", f"{pct_from_hi:.1f}%")
+        sc[4].metric("ATR",      f"₹{atr_val:,.0f}")
+        sc[5].metric("RSI-14",   f"{rsi_val:.1f}")
+        sc[6].metric("ADX-14",   f"{adx_val:.1f}")
+        sc[7].metric("Vol×Avg",  f"{vol_ratio:.2f}×")
+
+        # Stock intelligence
+        intel = classify_stock_state(last_row)
+        pills_html = ""
+        for label, (text, cls) in [("Trend", intel["trend"]), ("Momentum", intel["momentum"]),
+                                    ("Volatility", intel["volatility"]), ("State", intel["state"])]:
+            pills_html += f"<span style='font-size:0.68rem;color:#64748b;margin-right:2px'>{label}:</span>"
+            pills_html += f"<span class='intel-pill {cls}'>{text}</span> &nbsp;"
+        st.markdown(f"<div style='margin:4px 0 8px'>{pills_html}</div>", unsafe_allow_html=True)
+
+        # Signal card with explanation
+        if not scan_df.empty:
+            sr_row = scan_df[scan_df["Symbol"] == selected_symbol]
+            if not sr_row.empty:
+                sr     = sr_row.iloc[0]
+                sig    = sr["Signal"]
+                color  = SIGNAL_COLORS.get(sig, "#64748b")
+                bg     = SIGNAL_BG.get(sig, "#f1f5f9")
+                grade  = sr.get("Grade","")
+                expl   = explain_signal(sig, sr.get("Passed",""), sr.get("Blockers",""), sr["BUY%"], grade)
+                stop_s = f"Stop <b>₹{sr['Stop']:,.1f}</b> &nbsp;" if pd.notna(sr.get("Stop")) else ""
+                tgt_s  = f"Target <b>₹{sr['Target']:,.1f}</b>" if pd.notna(sr.get("Target")) else ""
+                pass_s = f"<span style='font-size:0.72rem;color:#64748b'>Gates: {sr['Passed']}</span>" if sr.get("Passed") else ""
+                risk_tags = ""
+                if sr.get("RSI_warn"):
+                    risk_tags += "<span style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ RSI >70 — overbought entry</span>"
+                if sr.get("ATR_warn"):
+                    risk_tags += "<span style='font-size:0.7rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ High ATR — stop wider than normal</span>"
+                if sr.get("WeakBUY"):
+                    risk_tags += "<span style='font-size:0.7rem;background:#f1f5f9;color:#64748b;border-radius:4px;padding:1px 7px'>Grade C + RSI>65 + low volume — HOLD is acceptable</span>"
+                sideways_note = ""
+                if trend_regime == "SIDEWAYS" and sig == "BUY":
+                    sideways_note = "<div style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:3px 8px;margin-top:4px'>⚠ Sideways regime — lower signal reliability, tighten stop</div>"
+                st.markdown(f"""
+<div class='card' style='border-left:4px solid {color};margin-bottom:8px;background:{bg}20'>
+  <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>
+    <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
+    <span style='font-size:0.85rem;color:#334155'>BUY% <b>{sr['BUY%']}</b> &nbsp; Confs <b>{sr['Confs']}</b> &nbsp; Rank <b>#{sr['Rank']}</b></span>
+    <span style='font-size:0.85rem;color:#334155'>{stop_s}{tgt_s}</span>
+  </div>
+  <div style='font-size:0.78rem;color:#475569;margin-bottom:4px'>{expl}</div>
+  {pass_s}
+  {risk_tags}
+  {sideways_note}
+</div>""", unsafe_allow_html=True)
+
+        fig = make_chart(
+            stock_df, selected_symbol, lookback,
+            show_ema9, show_ema20, show_ema50, show_ema200,
+            show_bb, show_supertrend, show_pivots, show_sr,
+            model, model_features,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Signal Scan table (collapsible) ──────────────────────────────
+    if not scan_df.empty:
+        n_total = len(scan_df)
+        n_shown = len(filtered_df) if not filtered_df.empty else 0
+        label   = f"Signal Scan — {n_shown} of {n_total} signals"
+        with st.expander(label, expanded=False):
             def _style_row(row):
                 styles = []
                 for col in row.index:
@@ -1157,6 +1258,7 @@ with tab1:
                         styles.append("color:#334155")
                 return styles
 
+            show_cols = ["Symbol","Price","1D%","Signal","Grade","BUY%","Confs","RSI"]
             disp = filtered_df[show_cols] if not filtered_df.empty else pd.DataFrame(columns=show_cols)
             styled = (
                 disp.style
@@ -1165,124 +1267,19 @@ with tab1:
             )
             try:
                 event = st.dataframe(
-                    styled, use_container_width=True, height=440,
+                    styled, use_container_width=True, height=400,
                     on_select="rerun", selection_mode="single-row", key="scan_table",
                 )
                 if event.selection and event.selection.rows and not filtered_df.empty:
                     selected_symbol = filtered_df.iloc[event.selection.rows[0]]["Symbol"]
             except Exception:
-                st.dataframe(styled, use_container_width=True, height=440)
+                st.dataframe(styled, use_container_width=True, height=400)
 
             st.download_button(
                 "⬇ Export CSV", scan_df.to_csv(index=False),
                 file_name=f"nse_signals_{date.today()}.csv",
-                mime="text/csv", use_container_width=True,
+                mime="text/csv",
             )
-
-    with right_col:
-        # Watchlist quick chips
-        if st.session_state.watchlist:
-            wl_display = st.columns(len(st.session_state.watchlist))
-            for wl_c, sym in zip(wl_display, st.session_state.watchlist):
-                if not scan_df.empty:
-                    row_m = scan_df[scan_df["Symbol"] == sym]
-                    sig_m  = row_m.iloc[0]["Signal"] if not row_m.empty else "HOLD"
-                    price_m = row_m.iloc[0]["Price"] if not row_m.empty else 0
-                    chg_m   = row_m.iloc[0]["1D%"]  if not row_m.empty else 0
-                    col_m   = SIGNAL_COLORS.get(sig_m,"#64748b")
-                    wl_c.markdown(f"""
-<div style='background:#fff;border:1px solid #e2e8f0;border-top:3px solid {col_m};
-     border-radius:8px;padding:7px 10px;text-align:center;cursor:pointer'>
-  <div style='font-weight:700;font-size:0.82rem;color:#1e293b'>{sym}</div>
-  <div style='font-size:0.78rem;color:#334155'>₹{price_m:,.0f}</div>
-  <div style='font-size:0.72rem;color:{col_m}'>{sig_m}</div>
-  <div style='font-size:0.7rem;color:{"#16a34a" if chg_m>=0 else "#dc2626"}'>{chg_m:+.1f}%</div>
-</div>""", unsafe_allow_html=True)
-
-        st.markdown(f"#### {selected_symbol}")
-
-        with st.spinner(f"Loading {selected_symbol}…"):
-            stock_df = get_stock_data(selected_symbol, lookback + 250)
-
-        if stock_df is None or stock_df.empty:
-            st.error(f"No data available for {selected_symbol}.")
-        else:
-            last_row   = stock_df.iloc[-1]
-            prev_row   = stock_df.iloc[-2] if len(stock_df) >= 2 else last_row
-            last_price = float(last_row["Close"])
-            day_chg    = (last_price / float(prev_row["Close"]) - 1) * 100
-            week_chg   = (last_price / float(stock_df.iloc[-6]["Close"]) - 1) * 100 if len(stock_df) >= 6 else 0
-            month_chg  = (last_price / float(stock_df.iloc[-22]["Close"]) - 1) * 100 if len(stock_df) >= 22 else 0
-            high52     = float(stock_df["High"].tail(252).max())
-            low52      = float(stock_df["Low"].tail(252).min())
-            pct_from_hi = (last_price / high52 - 1) * 100
-            atr_val    = float(last_row.get("ATR", 0) or 0)
-            rsi_val    = float(last_row.get("feat_rsi", 50) or 50)
-            adx_val    = float(last_row.get("feat_adx", 0) or 0) * 100
-            vol_ratio  = float(last_row.get("feat_volume_ratio", 1) or 1)
-
-            sc = st.columns(8)
-            sc[0].metric("Price",    f"₹{last_price:,.1f}", f"{day_chg:+.2f}%")
-            sc[1].metric("1W",       f"{week_chg:+.2f}%")
-            sc[2].metric("1M",       f"{month_chg:+.2f}%")
-            sc[3].metric("52W High", f"₹{high52:,.0f}", f"{pct_from_hi:.1f}%")
-            sc[4].metric("ATR",      f"₹{atr_val:,.0f}")
-            sc[5].metric("RSI-14",   f"{rsi_val:.1f}")
-            sc[6].metric("ADX-14",   f"{adx_val:.1f}")
-            sc[7].metric("Vol×Avg",  f"{vol_ratio:.2f}×")
-
-            # Stock intelligence
-            intel = classify_stock_state(last_row)
-            pills_html = ""
-            for label, (text, cls) in [("Trend", intel["trend"]), ("Momentum", intel["momentum"]),
-                                        ("Volatility", intel["volatility"]), ("State", intel["state"])]:
-                pills_html += f"<span style='font-size:0.68rem;color:#64748b;margin-right:2px'>{label}:</span>"
-                pills_html += f"<span class='intel-pill {cls}'>{text}</span> &nbsp;"
-            st.markdown(f"<div style='margin:4px 0 8px'>{pills_html}</div>", unsafe_allow_html=True)
-
-            # Signal card with explanation
-            if not scan_df.empty:
-                sr_row = scan_df[scan_df["Symbol"] == selected_symbol]
-                if not sr_row.empty:
-                    sr     = sr_row.iloc[0]
-                    sig    = sr["Signal"]
-                    color  = SIGNAL_COLORS.get(sig, "#64748b")
-                    bg     = SIGNAL_BG.get(sig, "#f1f5f9")
-                    grade  = sr.get("Grade","")
-                    expl   = explain_signal(sig, sr.get("Passed",""), sr.get("Blockers",""), sr["BUY%"], grade)
-                    stop_s = f"Stop <b>₹{sr['Stop']:,.1f}</b> &nbsp;" if pd.notna(sr.get("Stop")) else ""
-                    tgt_s  = f"Target <b>₹{sr['Target']:,.1f}</b>" if pd.notna(sr.get("Target")) else ""
-                    pass_s = f"<span style='font-size:0.72rem;color:#64748b'>Gates: {sr['Passed']}</span>" if sr.get("Passed") else ""
-                    risk_tags = ""
-                    if sr.get("RSI_warn"):
-                        risk_tags += "<span style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ RSI >70 — overbought entry</span>"
-                    if sr.get("ATR_warn"):
-                        risk_tags += "<span style='font-size:0.7rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ High ATR — stop wider than normal</span>"
-                    if sr.get("WeakBUY"):
-                        risk_tags += "<span style='font-size:0.7rem;background:#f1f5f9;color:#64748b;border-radius:4px;padding:1px 7px'>Grade C + RSI>65 + low volume — HOLD is acceptable</span>"
-                    sideways_note = ""
-                    if trend_regime == "SIDEWAYS" and sig == "BUY":
-                        sideways_note = "<div style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:3px 8px;margin-top:4px'>⚠ Sideways regime — lower signal reliability, tighten stop</div>"
-                    st.markdown(f"""
-<div class='card' style='border-left:4px solid {color};margin-bottom:8px;background:{bg}20'>
-  <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>
-    <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
-    <span style='font-size:0.85rem;color:#334155'>BUY% <b>{sr['BUY%']}</b> &nbsp; Confs <b>{sr['Confs']}</b> &nbsp; Rank <b>#{sr['Rank']}</b></span>
-    <span style='font-size:0.85rem;color:#334155'>{stop_s}{tgt_s}</span>
-  </div>
-  <div style='font-size:0.78rem;color:#475569;margin-bottom:4px'>{expl}</div>
-  {pass_s}
-  {risk_tags}
-  {sideways_note}
-</div>""", unsafe_allow_html=True)
-
-            fig = make_chart(
-                stock_df, selected_symbol, lookback,
-                show_ema9, show_ema20, show_ema50, show_ema200,
-                show_bb, show_supertrend, show_pivots, show_sr,
-                model, model_features,
-            )
-            st.plotly_chart(fig, use_container_width=True)
 
     # ── News panel ───────────────────────────────────────────────────
     st.markdown("---")
