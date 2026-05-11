@@ -363,38 +363,70 @@ def run_scan() -> pd.DataFrame:
     return df_out.sort_values(["_s", "BUY%"], ascending=[True, False]).drop(columns=["_s"]).reset_index(drop=True)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_news(max_per_feed: int = 3) -> list[dict]:
-    """Fetch headlines from RSS feeds. Returns list of {title, link, source, cls, pub}."""
+    """Fetch headlines from RSS feeds, sorted newest-first, max 7 days old."""
+    import html
     articles = []
+    cutoff = datetime.now() - timedelta(days=7)
+
+    _pub_fmts = [
+        "%a, %d %b %Y %H:%M:%S %z",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%a, %d %b %Y %H:%M:%S",
+        "%a, %d %b %Y %H:%M",
+    ]
+
     for feed in NEWS_FEEDS:
         try:
-            resp = requests.get(feed["url"], timeout=5,
+            resp = requests.get(feed["url"], timeout=6,
                                 headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code != 200:
                 continue
             root = ET.fromstring(resp.content)
-            items = root.findall(".//item")[:max_per_feed]
+            items = root.findall(".//item")
+            count = 0
             for item in items:
-                title = (item.findtext("title") or "").strip()
-                link  = (item.findtext("link")  or "").strip()
+                if count >= max_per_feed:
+                    break
+                title = html.unescape((item.findtext("title") or "").strip())
+                link  = (item.findtext("link") or "").strip()
                 pub   = (item.findtext("pubDate") or "").strip()
-                if title and link:
-                    # parse pub date
+                if not title or not link:
+                    continue
+
+                # parse publish date
+                pub_dt = None
+                for fmt in _pub_fmts:
                     try:
-                        dt = datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M")
-                        pub_fmt = dt.strftime("%d %b %H:%M")
+                        pub_dt = datetime.strptime(pub[:31].strip(), fmt)
+                        pub_dt = pub_dt.replace(tzinfo=None)
+                        break
                     except Exception:
-                        pub_fmt = pub[:16] if pub else ""
-                    articles.append({
-                        "title":  title[:110],
-                        "link":   link,
-                        "source": feed["name"],
-                        "cls":    feed["cls"],
-                        "pub":    pub_fmt,
-                    })
+                        continue
+
+                # skip articles older than 7 days
+                if pub_dt and pub_dt < cutoff:
+                    continue
+
+                pub_fmt = pub_dt.strftime("%d %b %H:%M") if pub_dt else "recent"
+                articles.append({
+                    "title":  title[:120],
+                    "link":   link,
+                    "source": feed["name"],
+                    "cls":    feed["cls"],
+                    "pub":    pub_fmt,
+                    "pub_dt": pub_dt or datetime.min,
+                })
+                count += 1
         except Exception:
             continue
+
+    # sort all articles newest-first
+    articles.sort(key=lambda a: a["pub_dt"], reverse=True)
+    # remove internal sort key before returning
+    for a in articles:
+        a.pop("pub_dt", None)
     return articles
 
 
@@ -1187,12 +1219,14 @@ with tab1:
 
     if articles:
         n_cols = st.columns(2)
-        mid = len(articles) // 2
+        mid = max(1, len(articles) // 2)
         for col_n, chunk in zip(n_cols, [articles[:mid], articles[mid:]]):
+            if not chunk:
+                continue
             with col_n:
-                html = ""
+                news_html = ""
                 for a in chunk:
-                    html += f"""
+                    news_html += f"""
 <div class='news-item'>
   <span class='news-source src-{a["cls"]}'>{a["source"]}</span>
   <span style='font-size:0.7rem;color:#94a3b8'>{a["pub"]}</span><br>
@@ -1201,9 +1235,9 @@ with tab1:
     {a["title"]}
   </a>
 </div>"""
-                st.markdown(f"<div class='card'>{html}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='card'>{news_html}</div>", unsafe_allow_html=True)
     else:
-        st.info("News feeds unavailable — check network connectivity.")
+        st.info("No news from the last 7 days — feeds may be unavailable or returning stale content.")
 
 
 # ═══════════════════════════════════════════════════════════════════════
