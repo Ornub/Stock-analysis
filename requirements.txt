@@ -5,3 +5,6 @@ numpy
 requests
 xgboost
 scikit-learn
+streamlit
+plotly
+vaderSentiment
