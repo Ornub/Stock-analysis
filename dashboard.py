@@ -51,7 +51,7 @@ st.markdown("""
 <style>
   /* Base / background */
   .stApp { background-color: #f5f6fa; }
-  .block-container { padding-top: 0.8rem; padding-bottom: 0.5rem; max-width: 1400px; }
+  .block-container { padding-top: 2.5rem; padding-bottom: 0.5rem; max-width: 1400px; }
 
   /* Sidebar */
   [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
@@ -924,34 +924,34 @@ regime_label = {"BULL": "Bull Market", "BEAR": "Bear Market", "SIDEWAYS": "Sidew
 vix_icon     = "🔴" if vol_regime in ("HIGH","EXTREME") else ("🟡" if vol_regime == "NORMAL" else "🟢")
 chg_color    = "#16a34a" if mkt_ret_1d >= 0 else "#dc2626"
 
+_regime_asterisk = "" if mkt_data_ok else "<span style='color:#ca8a04;font-size:0.7rem'> (est.)</span>"
 st.markdown(f"""
 <div class='regime-banner'>
-  <div>
-    <div style='font-size:1.25rem;font-weight:800;color:#1e293b'>NSE Swing Intelligence</div>
-    <div style='font-size:0.75rem;color:#64748b'>{date.today().strftime("%A, %d %B %Y")}</div>
+  <div style='min-width:180px'>
+    <div style='font-size:1.2rem;font-weight:800;color:#1e293b;white-space:nowrap'>NSE Swing Intelligence</div>
+    <div style='font-size:0.72rem;color:#64748b'>{date.today().strftime("%A, %d %B %Y")}</div>
   </div>
-  <div style='flex:1'></div>
-  <div style='text-align:center'>
-    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>NIFTY 50</div>
-    <div style='font-size:1.1rem;font-weight:700;color:#1e293b'>{_nifty_str}
-      <span style='color:{chg_color};font-size:0.9rem'>{_chg_str}</span>
+  <div style='display:flex;gap:20px;flex-wrap:wrap;align-items:center;justify-content:flex-end;flex:1'>
+    <div style='text-align:center;min-width:70px'>
+      <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>NIFTY 50</div>
+      <div style='font-size:1rem;font-weight:700;color:#1e293b;white-space:nowrap'>{_nifty_str} <span style='color:{chg_color};font-size:0.82rem'>{_chg_str}</span></div>
     </div>
-  </div>
-  <div style='text-align:center'>
-    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>REGIME</div>
-    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{regime_icon} {regime_label}{"*" if not mkt_data_ok else ""}</div>
-  </div>
-  <div style='text-align:center'>
-    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>VIX</div>
-    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{vix_icon} {_vix_str}</div>
-  </div>
-  <div style='text-align:center'>
-    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>EMA50</div>
-    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{_dma50_str}</div>
-  </div>
-  <div style='text-align:center'>
-    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>EMA200</div>
-    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{_dma200_str}</div>
+    <div style='text-align:center;min-width:90px'>
+      <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>REGIME</div>
+      <div style='font-size:0.88rem;font-weight:700;color:#1e293b;white-space:nowrap'>{regime_icon} {regime_label}{_regime_asterisk}</div>
+    </div>
+    <div style='text-align:center;min-width:55px'>
+      <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>VIX</div>
+      <div style='font-size:0.88rem;font-weight:700;color:#1e293b'>{vix_icon} {_vix_str}</div>
+    </div>
+    <div style='text-align:center;min-width:60px'>
+      <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>EMA50</div>
+      <div style='font-size:0.88rem;font-weight:600;color:#1e293b'>{_dma50_str}</div>
+    </div>
+    <div style='text-align:center;min-width:60px'>
+      <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>EMA200</div>
+      <div style='font-size:0.88rem;font-weight:600;color:#1e293b'>{_dma200_str}</div>
+    </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
