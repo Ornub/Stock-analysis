@@ -1,13 +1,7 @@
 """
-dashboard.py — NSE Swing Trading Live Dashboard v2  (Streamlit + Plotly)
-
-Tabs:
-  1. 📊 Dashboard   — Market regime, signal scan, interactive chart
-  2. 💼 Portfolio   — Monthly allocation with ATR-based sizing
-  3. 🗺  Sectors     — Sector heatmap & rotation signals
-  4. 📰 Deep Dive   — Extended stock analysis with news & fundamentals
-
-⚠️ Educational only — not financial advice.
+dashboard.py — NSE Swing Trading Dashboard v3  (Streamlit + Plotly)
+Institutional-grade light theme with news panel, signal intelligence, and quick filters.
+Educational only — not financial advice.
 """
 
 from __future__ import annotations
@@ -15,7 +9,8 @@ from __future__ import annotations
 import warnings
 warnings.filterwarnings("ignore")
 
-from datetime import date, timedelta
+import xml.etree.ElementTree as ET
+from datetime import date, timedelta, datetime
 from pathlib import Path
 
 import joblib
@@ -23,6 +18,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import requests
 import streamlit as st
 from plotly.subplots import make_subplots
 
@@ -40,11 +36,11 @@ from stock_fetcher import fetch_historical_data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page config & global CSS
+# Page config
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="NSE Swing Dashboard",
+    page_title="NSE Swing Intelligence",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -52,57 +48,164 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  .block-container { padding-top: 0.6rem; padding-bottom: 0rem; }
-  .metric-label  { font-size: 0.72rem !important; color: #90a4ae !important; }
-  .metric-value  { font-size: 1.05rem !important; font-weight: 700 !important; }
-  .stDataFrame   { font-size: 0.82rem; }
+  /* Base / background */
+  .stApp { background-color: #f5f6fa; }
+  .block-container { padding-top: 0.8rem; padding-bottom: 0.5rem; max-width: 1400px; }
+
+  /* Sidebar */
+  [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e2e8f0; }
+  [data-testid="stSidebar"] .stMarkdown h2,
+  [data-testid="stSidebar"] .stMarkdown h3,
+  [data-testid="stSidebar"] .stMarkdown h4 { color: #1e293b; }
+
+  /* Typography */
+  h1,h2,h3,h4 { color: #1e293b !important; font-weight: 700 !important; }
+  .stMarkdown p { color: #334155; }
+
+  /* Metric cards */
+  [data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 14px !important;
+  }
+  [data-testid="stMetricLabel"] { color: #64748b !important; font-size: 0.72rem !important; }
+  [data-testid="stMetricValue"] { color: #1e293b !important; font-size: 1.05rem !important; font-weight: 700 !important; }
+  [data-testid="stMetricDelta"] { font-size: 0.78rem !important; }
+
+  /* Tables */
+  .stDataFrame { font-size: 0.82rem; border-radius: 8px; overflow: hidden; }
+
+  /* Tab labels */
+  div[data-baseweb="tab-list"] button { font-size: 0.9rem; font-weight: 600; color: #475569; }
+  div[data-baseweb="tab-list"] button[aria-selected="true"] { color: #1d4ed8 !important; }
+  div[data-baseweb="tab-highlight"] { background-color: #1d4ed8 !important; }
+
+  /* Signal badges */
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 99px;
+    font-weight: 700; font-size: 0.78rem; letter-spacing: 0.4px;
+  }
+  .badge-BUY   { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+  .badge-WATCH { background: #fef9c3; color: #a16207; border: 1px solid #fde047; }
+  .badge-SELL  { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+  .badge-HOLD  { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
+
+  /* Cards */
+  .card {
+    background: #ffffff; border: 1px solid #e2e8f0;
+    border-radius: 12px; padding: 16px 20px; margin: 6px 0;
+  }
+  .card-accent-green  { border-left: 4px solid #16a34a; }
+  .card-accent-yellow { border-left: 4px solid #ca8a04; }
+  .card-accent-red    { border-left: 4px solid #dc2626; }
+  .card-accent-blue   { border-left: 4px solid #1d4ed8; }
+  .card-accent-gray   { border-left: 4px solid #94a3b8; }
+
+  /* Regime banner */
+  .regime-banner {
+    background: #ffffff; border: 1px solid #e2e8f0;
+    border-radius: 12px; padding: 12px 22px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 24px;
+  }
+
+  /* Top signal card */
+  .top-signal-card {
+    background: #ffffff; border: 1px solid #e2e8f0;
+    border-radius: 12px; padding: 14px 18px;
+  }
+
+  /* News item */
+  .news-item {
+    padding: 9px 0; border-bottom: 1px solid #f1f5f9;
+    line-height: 1.45;
+  }
+  .news-item:last-child { border-bottom: none; }
+  .news-source {
+    display: inline-block; font-size: 0.7rem; font-weight: 700;
+    padding: 1px 7px; border-radius: 99px; margin-right: 6px;
+  }
+  .src-ET   { background: #dbeafe; color: #1e40af; }
+  .src-MC   { background: #fce7f3; color: #9d174d; }
+  .src-Reuters { background: #fef3c7; color: #92400e; }
+  .src-BS   { background: #ede9fe; color: #5b21b6; }
+
+  /* Confidence bar */
+  .conf-bar-wrap { background:#f1f5f9; border-radius:99px; height:6px; margin-top:4px; }
+  .conf-bar-fill { border-radius:99px; height:6px; }
+
+  /* Intelligence pills */
+  .intel-pill {
+    display: inline-block; padding: 3px 10px; border-radius: 99px;
+    font-size: 0.72rem; font-weight: 600; margin: 2px 2px;
+  }
+  .pill-green  { background: #dcfce7; color: #15803d; }
+  .pill-red    { background: #fee2e2; color: #b91c1c; }
+  .pill-yellow { background: #fef9c3; color: #a16207; }
+  .pill-blue   { background: #dbeafe; color: #1e40af; }
+  .pill-gray   { background: #f1f5f9; color: #475569; }
+
+  /* Grade colors */
+  .grade-A { color: #b45309; font-weight: 800; }
+  .grade-B { color: #4b5563; font-weight: 700; }
+  .grade-C { color: #6b7280; font-weight: 600; }
+
+  /* Watchlist chips */
+  .wl-chip {
+    display: inline-block; background: #f8fafc; border: 1px solid #cbd5e1;
+    border-radius: 8px; padding: 3px 9px; font-size: 0.78rem;
+    color: #334155; font-weight: 600; margin: 2px;
+  }
   div[data-testid="stHorizontalBlock"] > div { padding: 0 3px; }
-  .signal-badge {
-    display: inline-block; padding: 3px 10px; border-radius: 12px;
-    font-weight: 700; font-size: 0.85rem; letter-spacing: 0.5px;
-  }
-  .badge-BUY   { background: #003d1f; color: #00e676; border: 1px solid #00e676; }
-  .badge-WATCH { background: #3d3200; color: #ffeb3b; border: 1px solid #ffeb3b; }
-  .badge-SELL  { background: #3d0000; color: #ff1744; border: 1px solid #ff1744; }
-  .badge-HOLD  { background: #1e2130; color: #78909c; border: 1px solid #455a64; }
-  .grade-A { color: #ffd700; font-weight: 900; }
-  .grade-B { color: #c0c0c0; font-weight: 700; }
-  .grade-C { color: #cd7f32; font-weight: 600; }
-  .regime-bull { background: linear-gradient(90deg,#003d1f,#131722); border-left: 4px solid #00e676; }
-  .regime-bear { background: linear-gradient(90deg,#3d0000,#131722); border-left: 4px solid #ff1744; }
-  .regime-side { background: linear-gradient(90deg,#3d3200,#131722); border-left: 4px solid #ffeb3b; }
-  .info-card {
-    background: #1e2130; border-radius: 10px; padding: 14px 18px;
-    border: 1px solid #2a2f45; margin: 4px 0;
-  }
-  div[data-baseweb="tab-list"] button { font-size: 0.95rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Colour palette
+# Colour palette (light theme)
 # ─────────────────────────────────────────────────────────────────────────────
 
 C = {
-    "bull": "#26a69a", "bear": "#ef5350",
-    "ema9": "#ff9800", "ema20": "#ffeb3b",
-    "ema50": "#29b6f6", "ema200": "#ab47bc",
-    "vol_up": "#26a69a", "vol_dn": "#ef5350",
-    "rsi_ln": "#ff9800",
-    "macd_h+": "#26a69a", "macd_h-": "#ef5350",
-    "macd_ln": "#ff9800", "sig_ln": "#29b6f6",
-    "stop": "#ef5350", "target": "#26a69a",
-    "bb": "#4fc3f7",
-    "supertrend_bull": "#26a69a", "supertrend_bear": "#ef5350",
-    "buy_mk": "#00e676", "sell_mk": "#ff1744",
-    "bg": "#131722", "grid": "#1e2130",
+    "bull": "#16a34a", "bear": "#dc2626",
+    "ema9": "#f97316", "ema20": "#eab308",
+    "ema50": "#0ea5e9", "ema200": "#8b5cf6",
+    "vol_up": "#16a34a", "vol_dn": "#dc2626",
+    "rsi_ln": "#f97316",
+    "macd_h+": "#16a34a", "macd_h-": "#dc2626",
+    "macd_ln": "#f97316", "sig_ln": "#0ea5e9",
+    "stop": "#dc2626", "target": "#16a34a",
+    "bb": "#0ea5e9",
+    "supertrend_bull": "#16a34a", "supertrend_bear": "#dc2626",
+    "buy_mk": "#16a34a", "sell_mk": "#dc2626",
+    "bg": "#ffffff", "grid": "#f1f5f9",
+    "text": "#1e293b",
 }
 
-SIGNAL_COLORS = {
-    "BUY": "#00e676", "WATCH": "#ffeb3b",
-    "HOLD": "#78909c", "SELL": "#ff1744",
-}
+SIGNAL_COLORS  = {"BUY": "#16a34a", "WATCH": "#ca8a04", "HOLD": "#64748b", "SELL": "#dc2626"}
+SIGNAL_BG      = {"BUY": "#dcfce7", "WATCH": "#fef9c3", "HOLD": "#f1f5f9", "SELL": "#fee2e2"}
+
+NEWS_FEEDS = [
+    {
+        "name": "ET Markets",
+        "cls":  "ET",
+        "url":  "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+    },
+    {
+        "name": "Moneycontrol",
+        "cls":  "MC",
+        "url":  "https://www.moneycontrol.com/rss/marketreports.xml",
+    },
+    {
+        "name": "Business Standard",
+        "cls":  "BS",
+        "url":  "https://www.business-standard.com/rss/markets-106.rss",
+    },
+    {
+        "name": "Reuters India",
+        "cls":  "Reuters",
+        "url":  "https://feeds.reuters.com/reuters/INbusinessNews",
+    },
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +237,6 @@ def get_market_data():
 
 @st.cache_data(ttl=900, show_spinner=False)
 def run_scan() -> pd.DataFrame:
-    """Score all NIFTY_50 stocks with v3 model + 7-gate gates."""
     model, blob = load_model()
     if model is None:
         return pd.DataFrame()
@@ -190,8 +292,8 @@ def run_scan() -> pd.DataFrame:
                  "B" if n_pass >= GRADE_B_MIN else
                  "C" if n_pass >= GRADE_C_MIN else "D")
 
-        ema200_ok = confirmations["EMA200"]
-        gate_pass = ema200_ok and sym in ranked_set and not regime_blocked and n_pass >= MIN_CONFIRMATIONS
+        ema200_ok    = confirmations["EMA200"]
+        gate_pass    = ema200_ok and sym in ranked_set and not regime_blocked and n_pass >= MIN_CONFIRMATIONS
 
         if buy_p >= BUY_PROBA and gate_pass:
             signal = "BUY"
@@ -240,18 +342,151 @@ def run_scan() -> pd.DataFrame:
     return df_out.sort_values(["_s", "BUY%"], ascending=[True, False]).drop(columns=["_s"]).reset_index(drop=True)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_news(max_per_feed: int = 3) -> list[dict]:
+    """Fetch headlines from RSS feeds. Returns list of {title, link, source, cls, pub}."""
+    articles = []
+    for feed in NEWS_FEEDS:
+        try:
+            resp = requests.get(feed["url"], timeout=5,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                continue
+            root = ET.fromstring(resp.content)
+            items = root.findall(".//item")[:max_per_feed]
+            for item in items:
+                title = (item.findtext("title") or "").strip()
+                link  = (item.findtext("link")  or "").strip()
+                pub   = (item.findtext("pubDate") or "").strip()
+                if title and link:
+                    # parse pub date
+                    try:
+                        dt = datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M")
+                        pub_fmt = dt.strftime("%d %b %H:%M")
+                    except Exception:
+                        pub_fmt = pub[:16] if pub else ""
+                    articles.append({
+                        "title":  title[:110],
+                        "link":   link,
+                        "source": feed["name"],
+                        "cls":    feed["cls"],
+                        "pub":    pub_fmt,
+                    })
+        except Exception:
+            continue
+    return articles
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Intelligence helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def explain_signal(signal: str, passed: str, blockers: str, buy_pct: float, grade: str) -> str:
+    parts = passed.split(", ") if passed else []
+    blk   = blockers.split(", ") if blockers else []
+
+    trend_ok  = "EMA200" in parts and "EMA50" in parts
+    momentum  = "ADX" in parts and "MACD" in parts
+    breakout  = "Breakout" in parts
+    vol_ok    = "Volume" in parts
+
+    if signal == "BUY":
+        base = "Uptrend confirmed"
+        if trend_ok:
+            base += " — price above EMA200 & EMA50"
+        if momentum:
+            base += ", strong momentum (ADX + MACD)"
+        if breakout:
+            base += ", near 20-day high"
+        if vol_ok:
+            base += " with volume expansion"
+        base += f". Model confidence {buy_pct:.0f}%, Grade {grade}."
+        return base
+    elif signal == "WATCH":
+        base = f"Model score {buy_pct:.0f}% is bullish"
+        if blk:
+            base += f", but blocked by: {', '.join(blk)}"
+        base += ". Wait for gate confirmation before entering."
+        return base
+    elif signal == "SELL":
+        return "Bearish model score. Price structure weakening — avoid new longs."
+    else:
+        return "No clear directional edge. Holding pattern — monitor for breakout."
+
+
+def classify_stock_state(latest) -> dict:
+    def gv(col, fb=0.0):
+        return float(latest.get(col, fb) or fb)
+
+    ema200_ratio = gv("feat_ema200_ratio")
+    ema50_ratio  = gv("feat_ema50_ratio")
+    ema20_ratio  = gv("feat_ema20_ratio")
+    adx          = gv("feat_adx") * 100
+    macd_hist    = gv("feat_macd_hist")
+    dist_20d     = gv("feat_dist_20d_high")
+    vol_ratio    = gv("feat_volume_ratio")
+    rsi          = gv("feat_rsi")
+    atr_pct      = gv("feat_atr_pct", 0.015)
+
+    # Trend
+    if ema200_ratio > 0 and ema50_ratio > 0 and ema20_ratio > 0:
+        trend = ("Uptrend", "pill-green")
+    elif ema200_ratio < 0 and ema50_ratio < 0:
+        trend = ("Downtrend", "pill-red")
+    elif ema200_ratio > 0:
+        trend = ("Weak uptrend", "pill-yellow")
+    else:
+        trend = ("Consolidation", "pill-gray")
+
+    # Momentum
+    if adx >= 25 and macd_hist > 0:
+        momentum = ("Rising", "pill-green")
+    elif adx >= 20 and macd_hist >= 0:
+        momentum = ("Neutral+", "pill-yellow")
+    elif macd_hist < 0 and adx >= 20:
+        momentum = ("Fading", "pill-yellow")
+    else:
+        momentum = ("Weak", "pill-gray")
+
+    # Volatility
+    if atr_pct > 0.025:
+        volatility = ("High", "pill-red")
+    elif atr_pct > 0.015:
+        volatility = ("Normal", "pill-yellow")
+    else:
+        volatility = ("Low", "pill-green")
+
+    # State
+    if dist_20d > 0 and vol_ratio >= VOLUME_THRESHOLD:
+        state = ("Breakout", "pill-green")
+    elif rsi > 65 and dist_20d > 0:
+        state = ("Overbought", "pill-yellow")
+    elif rsi < 35:
+        state = ("Oversold", "pill-blue")
+    elif abs(dist_20d) < 0.005 and adx < 20:
+        state = ("Consolidating", "pill-gray")
+    else:
+        state = ("Pullback", "pill-yellow")
+
+    return {
+        "trend": trend,
+        "momentum": momentum,
+        "volatility": volatility,
+        "state": state,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Indicators
 # ─────────────────────────────────────────────────────────────────────────────
 
 def calc_bollinger(close: pd.Series, window=20, num_std=2.0):
-    mid  = close.rolling(window).mean()
-    std  = close.rolling(window).std()
+    mid = close.rolling(window).mean()
+    std = close.rolling(window).std()
     return mid - num_std * std, mid, mid + num_std * std
 
 
 def calc_supertrend(df: pd.DataFrame, period=10, multiplier=3.0):
-    """ATR-based Supertrend indicator."""
     hl2  = (df["High"] + df["Low"]) / 2
     atr  = df["High"].combine(df["Low"], max).sub(df["Low"]).ewm(com=period - 1, adjust=False).mean()
     upper = hl2 + multiplier * atr
@@ -276,15 +511,12 @@ def calc_supertrend(df: pd.DataFrame, period=10, multiplier=3.0):
 
 
 def pivot_levels(high, low, close) -> dict:
-    p  = (high + low + close) / 3
-    return dict(
-        P=p, R1=2*p-low, R2=p+(high-low), R3=high+2*(p-low),
-        S1=2*p-high, S2=p-(high-low), S3=low-2*(high-p),
-    )
+    p = (high + low + close) / 3
+    return dict(P=p, R1=2*p-low, R2=p+(high-low), R3=high+2*(p-low),
+                S1=2*p-high, S2=p-(high-low), S3=low-2*(high-p))
 
 
 def find_support_resistance(df: pd.DataFrame, n_levels=3):
-    """Simple pivot-based S/R from recent highs and lows."""
     highs = df["High"].rolling(5, center=True).max()
     lows  = df["Low"].rolling(5, center=True).min()
     res = sorted(highs.dropna().nlargest(n_levels).tolist(), reverse=True)
@@ -293,7 +525,7 @@ def find_support_resistance(df: pd.DataFrame, n_levels=3):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main chart builder
+# Chart builder
 # ─────────────────────────────────────────────────────────────────────────────
 
 def make_chart(
@@ -340,11 +572,11 @@ def make_chart(
     fig = make_subplots(
         rows=4, cols=1, shared_xaxes=True,
         row_heights=[0.55, 0.15, 0.15, 0.15],
-        vertical_spacing=0.015,
+        vertical_spacing=0.012,
         subplot_titles=("", "Volume", "RSI-14", "MACD"),
     )
 
-    # ── Candlestick ──────────────────────────────────────────────────────────
+    # Candlestick
     fig.add_trace(go.Candlestick(
         x=dt, open=df["Open"], high=h, low=lo, close=c,
         increasing_line_color=C["bull"], decreasing_line_color=C["bear"],
@@ -352,7 +584,7 @@ def make_chart(
         name="OHLC", showlegend=False, whiskerwidth=0.6,
     ), row=1, col=1)
 
-    # ── Bollinger Bands ──────────────────────────────────────────────────────
+    # Bollinger Bands
     if show_bb:
         bb_lo, bb_mid, bb_hi = calc_bollinger(c)
         fig.add_trace(go.Scatter(x=dt, y=bb_hi,  name="BB Upper",
@@ -361,13 +593,11 @@ def make_chart(
         fig.add_trace(go.Scatter(x=dt, y=bb_mid, name="BB Mid",
                                  line=dict(color=C["bb"], width=1),
                                  showlegend=False, opacity=0.6), row=1, col=1)
-        fig.add_trace(go.Scatter(
-            x=dt, y=bb_lo, name="BB",
-            line=dict(color=C["bb"], width=1, dash="dot"),
-            fill="tonexty", fillcolor="rgba(79,195,247,0.05)",
-        ), row=1, col=1)
+        fig.add_trace(go.Scatter(x=dt, y=bb_lo, name="BB",
+                                 line=dict(color=C["bb"], width=1, dash="dot"),
+                                 fill="tonexty", fillcolor="rgba(14,165,233,0.06)"), row=1, col=1)
 
-    # ── EMAs ─────────────────────────────────────────────────────────────────
+    # EMAs
     ema_defs = [
         (9,   C["ema9"],   1.0, show_ema9,   "EMA9"),
         (20,  C["ema20"],  1.0, show_ema20,  "EMA20"),
@@ -375,50 +605,42 @@ def make_chart(
         (200, C["ema200"], 2.0, show_ema200, "EMA200"),
     ]
     for span, color, width, show, label in ema_defs:
-        ema_s = c.ewm(span=span, adjust=False).mean()
         if show:
+            ema_s = c.ewm(span=span, adjust=False).mean()
             fig.add_trace(go.Scatter(x=dt, y=ema_s, name=label,
                                      line=dict(color=color, width=width)), row=1, col=1)
 
-    # ── Supertrend ───────────────────────────────────────────────────────────
+    # Supertrend
     if show_supertrend and len(df) > 20:
         st_trend, st_line = calc_supertrend(df)
         bull_idx = st_trend == 1
         bear_idx = st_trend == -1
         if bull_idx.any():
-            fig.add_trace(go.Scatter(
-                x=dt[bull_idx], y=st_line[bull_idx], name="Supertrend↑",
-                mode="lines", line=dict(color=C["supertrend_bull"], width=2),
-            ), row=1, col=1)
+            fig.add_trace(go.Scatter(x=dt[bull_idx], y=st_line[bull_idx], name="ST↑",
+                                     mode="lines", line=dict(color=C["supertrend_bull"], width=2)), row=1, col=1)
         if bear_idx.any():
-            fig.add_trace(go.Scatter(
-                x=dt[bear_idx], y=st_line[bear_idx], name="Supertrend↓",
-                mode="lines", line=dict(color=C["supertrend_bear"], width=2),
-            ), row=1, col=1)
+            fig.add_trace(go.Scatter(x=dt[bear_idx], y=st_line[bear_idx], name="ST↓",
+                                     mode="lines", line=dict(color=C["supertrend_bear"], width=2)), row=1, col=1)
 
-    # ── Support / Resistance ─────────────────────────────────────────────────
+    # S/R
     if show_sr and len(df) > 30:
         res_levels, sup_levels = find_support_resistance(df.tail(60))
         for lvl in res_levels[:2]:
-            fig.add_hline(y=lvl, line_dash="dot",
-                          line_color="rgba(239,83,80,0.4)", line_width=1,
-                          annotation_text=f"R {lvl:,.0f}",
-                          annotation_font_color="rgba(239,83,80,0.7)",
+            fig.add_hline(y=lvl, line_dash="dot", line_color="rgba(220,38,38,0.45)", line_width=1,
+                          annotation_text=f"R {lvl:,.0f}", annotation_font_color="rgba(220,38,38,0.8)",
                           annotation_position="right", row=1, col=1)
         for lvl in sup_levels[:2]:
-            fig.add_hline(y=lvl, line_dash="dot",
-                          line_color="rgba(38,166,154,0.4)", line_width=1,
-                          annotation_text=f"S {lvl:,.0f}",
-                          annotation_font_color="rgba(38,166,154,0.7)",
+            fig.add_hline(y=lvl, line_dash="dot", line_color="rgba(22,163,74,0.45)", line_width=1,
+                          annotation_text=f"S {lvl:,.0f}", annotation_font_color="rgba(22,163,74,0.8)",
                           annotation_position="right", row=1, col=1)
 
-    # ── Buy / Sell signal markers ────────────────────────────────────────────
+    # Buy/Sell markers
     buy_df = df[buy_mask]
     if not buy_df.empty:
         fig.add_trace(go.Scatter(
             x=buy_df["DateTime"], y=buy_df["Low"] * 0.991,
             mode="markers", name="BUY ▲",
-            marker=dict(symbol="triangle-up", size=13,
+            marker=dict(symbol="triangle-up", size=12,
                         color=C["buy_mk"], line=dict(color="white", width=1)),
             hovertemplate="<b>BUY</b> %{x|%d %b}<br>Prob: %{customdata:.1%}<extra></extra>",
             customdata=buy_df["buy_prob"].values,
@@ -428,115 +650,117 @@ def make_chart(
         fig.add_trace(go.Scatter(
             x=sell_df["DateTime"], y=sell_df["High"] * 1.009,
             mode="markers", name="SELL ▼",
-            marker=dict(symbol="triangle-down", size=13,
+            marker=dict(symbol="triangle-down", size=12,
                         color=C["sell_mk"], line=dict(color="white", width=1)),
             hovertemplate="<b>SELL</b> %{x|%d %b}<extra></extra>",
         ), row=1, col=1)
 
-    # ── Stop / Target / Trailing bands ───────────────────────────────────────
+    # Stop/Target bands
     if show_buy_levels and last_atr > 0:
         stop_lvl   = last_price - ATR_STOP_MULT  * last_atr
         target_lvl = last_price + ATR_TARGET_MULT * last_atr
         trail_lvl  = last_price - ATR_TRAIL_MULT  * last_atr
         fig.add_hrect(y0=stop_lvl * 0.998, y1=stop_lvl * 1.002,
-                      fillcolor="rgba(239,83,80,0.18)", line_width=0,
+                      fillcolor="rgba(220,38,38,0.12)", line_width=0,
                       annotation_text=f"STOP ₹{stop_lvl:,.0f}",
-                      annotation_font_color=C["stop"],
-                      annotation_position="right", row=1, col=1)
+                      annotation_font_color=C["stop"], annotation_position="right", row=1, col=1)
         fig.add_hrect(y0=target_lvl * 0.998, y1=target_lvl * 1.002,
-                      fillcolor="rgba(38,166,154,0.18)", line_width=0,
+                      fillcolor="rgba(22,163,74,0.12)", line_width=0,
                       annotation_text=f"TARGET ₹{target_lvl:,.0f}",
-                      annotation_font_color=C["target"],
-                      annotation_position="right", row=1, col=1)
-        fig.add_hline(y=trail_lvl, line_dash="dot",
-                      line_color="rgba(239,83,80,0.5)", line_width=1.2,
+                      annotation_font_color=C["target"], annotation_position="right", row=1, col=1)
+        fig.add_hline(y=trail_lvl, line_dash="dot", line_color="rgba(220,38,38,0.45)", line_width=1.2,
                       annotation_text=f"Trail ₹{trail_lvl:,.0f}",
-                      annotation_font_color="rgba(239,83,80,0.7)",
-                      row=1, col=1)
+                      annotation_font_color="rgba(220,38,38,0.65)", row=1, col=1)
 
-    # ── Pivot levels ─────────────────────────────────────────────────────────
+    # Pivot levels
     if show_pivots and len(df) >= 2:
         ph = float(h.iloc[-2]); pl = float(lo.iloc[-2]); pc = float(c.iloc[-2])
         pv = pivot_levels(ph, pl, pc)
         for lbl, lvl, col, dash in [
-            ("R2", pv["R2"], "rgba(239,83,80,0.55)", "dot"),
-            ("R1", pv["R1"], "rgba(239,83,80,0.85)", "dash"),
-            ("P",  pv["P"],  "rgba(158,158,158,0.9)", "solid"),
-            ("S1", pv["S1"], "rgba(38,166,154,0.85)", "dash"),
-            ("S2", pv["S2"], "rgba(38,166,154,0.55)", "dot"),
+            ("R2", pv["R2"], "rgba(220,38,38,0.45)", "dot"),
+            ("R1", pv["R1"], "rgba(220,38,38,0.75)", "dash"),
+            ("P",  pv["P"],  "rgba(100,116,139,0.8)", "solid"),
+            ("S1", pv["S1"], "rgba(22,163,74,0.75)", "dash"),
+            ("S2", pv["S2"], "rgba(22,163,74,0.45)", "dot"),
         ]:
             fig.add_hline(y=lvl, line_dash=dash, line_color=col, line_width=1,
-                          annotation_text=f"{lbl} {lvl:,.0f}",
-                          annotation_font_color=col,
+                          annotation_text=f"{lbl} {lvl:,.0f}", annotation_font_color=col,
                           annotation_position="left", row=1, col=1)
 
-    # ── Volume ───────────────────────────────────────────────────────────────
+    # Volume
     vol_colors = [C["bull"] if cl >= op else C["bear"]
                   for cl, op in zip(df["Close"], df["Open"])]
     fig.add_trace(go.Bar(x=dt, y=vol, name="Volume",
-                         marker_color=vol_colors, showlegend=False), row=2, col=1)
+                         marker_color=vol_colors, opacity=0.75, showlegend=False), row=2, col=1)
     fig.add_trace(go.Scatter(x=dt, y=vol.rolling(20).mean(), name="Vol MA20",
-                             line=dict(color=C["ema20"], width=1),
-                             showlegend=False), row=2, col=1)
+                             line=dict(color=C["ema50"], width=1), showlegend=False), row=2, col=1)
 
-    # ── RSI ──────────────────────────────────────────────────────────────────
+    # RSI
     delta = c.diff()
     gain  = delta.where(delta > 0, 0.0).ewm(alpha=1/14, adjust=False).mean()
     loss  = (-delta).where(delta < 0, 0.0).ewm(alpha=1/14, adjust=False).mean().replace(0, np.nan)
     rsi   = 100 - 100 / (1 + gain / loss)
     fig.add_trace(go.Scatter(x=dt, y=rsi, name="RSI",
-                             line=dict(color=C["rsi_ln"], width=1.5),
-                             showlegend=False), row=3, col=1)
-    fig.add_hrect(y0=70, y1=100, fillcolor="rgba(239,83,80,0.07)", line_width=0, row=3, col=1)
-    fig.add_hrect(y0=0,  y1=30,  fillcolor="rgba(38,166,154,0.07)", line_width=0, row=3, col=1)
+                             line=dict(color=C["rsi_ln"], width=1.5), showlegend=False), row=3, col=1)
+    fig.add_hrect(y0=70, y1=100, fillcolor="rgba(220,38,38,0.06)", line_width=0, row=3, col=1)
+    fig.add_hrect(y0=0,  y1=30,  fillcolor="rgba(22,163,74,0.06)", line_width=0, row=3, col=1)
     for lvl in [70, 50, 30]:
-        fig.add_hline(y=lvl, line_dash="dot",
-                      line_color="rgba(255,255,255,0.15)", line_width=1, row=3, col=1)
+        fig.add_hline(y=lvl, line_dash="dot", line_color="rgba(100,116,139,0.3)", line_width=1, row=3, col=1)
 
-    # ── MACD ─────────────────────────────────────────────────────────────────
+    # MACD
     ema12  = c.ewm(span=12, adjust=False).mean()
     ema26  = c.ewm(span=26, adjust=False).mean()
     macd_l = ema12 - ema26
     sig_l  = macd_l.ewm(span=9, adjust=False).mean()
     hist   = macd_l - sig_l
     hist_colors = [C["macd_h+"] if v >= 0 else C["macd_h-"] for v in hist.fillna(0)]
-    fig.add_trace(go.Bar(x=dt, y=hist, name="Hist",
-                         marker_color=hist_colors, showlegend=False), row=4, col=1)
+    fig.add_trace(go.Bar(x=dt, y=hist, name="Hist", marker_color=hist_colors,
+                         opacity=0.75, showlegend=False), row=4, col=1)
     fig.add_trace(go.Scatter(x=dt, y=macd_l, name="MACD",
-                             line=dict(color=C["macd_ln"], width=1.5),
-                             showlegend=False), row=4, col=1)
+                             line=dict(color=C["macd_ln"], width=1.5), showlegend=False), row=4, col=1)
     fig.add_trace(go.Scatter(x=dt, y=sig_l, name="Signal",
-                             line=dict(color=C["sig_ln"], width=1, dash="dot"),
-                             showlegend=False), row=4, col=1)
-    fig.add_hline(y=0, line_color="rgba(255,255,255,0.18)", line_width=1, row=4, col=1)
+                             line=dict(color=C["sig_ln"], width=1, dash="dot"), showlegend=False), row=4, col=1)
+    fig.add_hline(y=0, line_color="rgba(100,116,139,0.3)", line_width=1, row=4, col=1)
 
-    # ── Layout ───────────────────────────────────────────────────────────────
-    signal_color = "#00e676" if show_buy_levels else ("#ff1744" if show_sell_levels else "#78909c")
+    # Layout
+    signal_color = C["bull"] if show_buy_levels else (C["bear"] if show_sell_levels else "#64748b")
     signal_label = "BUY" if show_buy_levels else ("SELL" if show_sell_levels else "HOLD")
     fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor=C["bg"], plot_bgcolor=C["bg"],
-        margin=dict(l=10, r=130, t=40, b=10),
+        template="plotly_white",
+        paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+        margin=dict(l=10, r=140, t=44, b=10),
         height=720,
         xaxis_rangeslider_visible=False,
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1, font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
-        font=dict(family="'Courier New', monospace", size=11),
+                    xanchor="right", x=1, font=dict(size=10),
+                    bgcolor="rgba(255,255,255,0.8)"),
+        font=dict(family="Inter, -apple-system, sans-serif", size=11, color="#334155"),
         title=dict(
-            text=(f"<b>{symbol}</b>  ₹{last_price:,.1f}"
-                  f"  <span style='color:{signal_color}'>{signal_label}</span>"
-                  f"  <span style='font-size:12px'>BUY% {last_buy_p*100:.1f} | Confs {last_conf}/7</span>"),
+            text=(f"<b style='color:#1e293b'>{symbol}</b>"
+                  f"  <span style='color:#334155'>₹{last_price:,.1f}</span>"
+                  f"  <span style='color:{signal_color};font-weight:700'>{signal_label}</span>"
+                  f"  <span style='color:#64748b;font-size:11px'>BUY% {last_buy_p*100:.1f} · Confs {last_conf}/7</span>"),
             x=0.01, font=dict(size=14),
         ),
     )
-    fig.update_xaxes(gridcolor=C["grid"], showgrid=True, zeroline=False)
-    fig.update_yaxes(gridcolor=C["grid"], showgrid=True, zeroline=False)
-    fig.update_yaxes(title_text="₹ Price", row=1, col=1)
-    fig.update_yaxes(title_text="Volume",  row=2, col=1)
-    fig.update_yaxes(title_text="RSI",     row=3, col=1, range=[0, 100])
-    fig.update_yaxes(title_text="MACD",    row=4, col=1)
+    fig.update_xaxes(gridcolor=C["grid"], showgrid=True, zeroline=False,
+                     linecolor="#e2e8f0", tickfont=dict(color="#64748b"))
+    fig.update_yaxes(gridcolor=C["grid"], showgrid=True, zeroline=False,
+                     linecolor="#e2e8f0", tickfont=dict(color="#64748b"))
+    fig.update_yaxes(title_text="₹ Price", title_font_color="#64748b", row=1, col=1)
+    fig.update_yaxes(title_text="Vol",     title_font_color="#64748b", row=2, col=1)
+    fig.update_yaxes(title_text="RSI",     title_font_color="#64748b", row=3, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="MACD",    title_font_color="#64748b", row=4, col=1)
     return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session state
+# ─────────────────────────────────────────────────────────────────────────────
+
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = ["RELIANCE", "INFY", "TCS", "HDFCBANK"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -544,48 +768,64 @@ def make_chart(
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## ⚙️ Settings")
+    st.markdown("## NSE Swing Intelligence")
     st.markdown("---")
 
+    # Stock selector
     selected_symbol = st.selectbox(
-        "📌 Stock", NIFTY_50,
+        "Stock", NIFTY_50,
         index=NIFTY_50.index("RELIANCE") if "RELIANCE" in NIFTY_50 else 0,
+        label_visibility="collapsed",
     )
-    lookback = st.selectbox(
-        "📅 Lookback", [30, 60, 90, 180, 365], index=2,
-        format_func=lambda x: f"{x} days",
-    )
+    lookback = st.selectbox("Lookback", [30, 60, 90, 180, 365], index=2,
+                             format_func=lambda x: f"{x} days")
 
+    st.markdown("---")
     st.markdown("#### Chart Overlays")
     col_a, col_b = st.columns(2)
     with col_a:
-        show_ema9   = st.checkbox("EMA 9",    value=True)
-        show_ema20  = st.checkbox("EMA 20",   value=True)
-        show_ema50  = st.checkbox("EMA 50",   value=True)
-        show_ema200 = st.checkbox("EMA 200",  value=True)
+        show_ema9   = st.checkbox("EMA 9",   value=True)
+        show_ema20  = st.checkbox("EMA 20",  value=True)
+        show_ema50  = st.checkbox("EMA 50",  value=True)
+        show_ema200 = st.checkbox("EMA 200", value=True)
     with col_b:
-        show_bb          = st.checkbox("Bollinger",   value=False)
-        show_supertrend  = st.checkbox("Supertrend",  value=False)
-        show_pivots      = st.checkbox("Pivots",      value=True)
-        show_sr          = st.checkbox("S/R Levels",  value=False)
+        show_bb         = st.checkbox("Bollinger", value=False)
+        show_supertrend = st.checkbox("Supertrend",value=False)
+        show_pivots     = st.checkbox("Pivots",    value=True)
+        show_sr         = st.checkbox("S/R",       value=False)
 
     st.markdown("---")
-    sig_filter = st.multiselect(
-        "🎯 Filter signals", ["BUY", "WATCH", "HOLD", "SELL"],
-        default=["BUY", "WATCH"],
-    )
+    st.markdown("#### Quick Filters")
+    sig_filter   = st.multiselect("Signal", ["BUY","WATCH","HOLD","SELL"], default=["BUY","WATCH"])
+    all_sectors  = sorted(set(SECTOR_MAP.values()))
+    sect_filter  = st.multiselect("Sector", all_sectors, default=[])
+    min_conf     = st.slider("Min BUY%", 0, 100, 0, 5)
+    rsi_range    = st.slider("RSI range", 0, 100, (0, 100), 5)
+
+    st.markdown("---")
+    st.markdown("#### Watchlist")
+    wl_items = "  ".join([f"<span class='wl-chip'>{s}</span>" for s in st.session_state.watchlist])
+    st.markdown(wl_items, unsafe_allow_html=True)
+    wl_add = st.selectbox("Add stock", ["—"] + [s for s in NIFTY_50 if s not in st.session_state.watchlist],
+                           label_visibility="collapsed")
+    wc1, wc2 = st.columns(2)
+    if wc1.button("+ Add", use_container_width=True) and wl_add != "—":
+        st.session_state.watchlist.append(wl_add)
+        st.rerun()
+    wl_rem = st.selectbox("Remove", ["—"] + st.session_state.watchlist, label_visibility="collapsed")
+    if wc2.button("− Remove", use_container_width=True) and wl_rem != "—":
+        st.session_state.watchlist.remove(wl_rem)
+        st.rerun()
 
     st.markdown("---")
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
-    st.markdown("---")
     st.caption("⚠️ Educational only — not financial advice.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load model
+# Load model & market data
 # ─────────────────────────────────────────────────────────────────────────────
 
 model, blob = load_model()
@@ -593,10 +833,6 @@ if model is None:
     st.error("No trained model found. Run `python swing_v2.py train` first.")
     st.stop()
 model_features = blob.get("features", FEATURE_COLS)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Load market data (shared across tabs)
-# ─────────────────────────────────────────────────────────────────────────────
 
 with st.spinner("Loading market data…"):
     market = get_market_data()
@@ -610,120 +846,198 @@ nifty_200dma = latest_mkt.get("nifty_200dma", 0)
 vix_raw      = latest_mkt.get("feat_vix_level", 0.15) * 100
 mkt_ret_1d   = latest_mkt.get("feat_market_return_1d", 0) * 100
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Header
+# Regime banner
 # ─────────────────────────────────────────────────────────────────────────────
 
-regime_css = {"BULL": "regime-bull", "BEAR": "regime-bear"}.get(trend_regime, "regime-side")
-regime_emoji = {"BULL": "🟢 BULL", "BEAR": "🔴 BEAR", "SIDEWAYS": "🟡 SIDEWAYS"}.get(trend_regime, "⚪")
-vol_emoji    = {"LOW": "🟢", "NORMAL": "🟢", "HIGH": "🟠", "EXTREME": "🔴"}.get(vol_regime, "⚪")
+regime_icon  = {"BULL": "🟢", "BEAR": "🔴"}.get(trend_regime, "🟡")
+regime_label = {"BULL": "Bull Market", "BEAR": "Bear Market", "SIDEWAYS": "Sideways"}.get(trend_regime, trend_regime)
+vix_icon     = "🔴" if vol_regime in ("HIGH","EXTREME") else ("🟡" if vol_regime == "NORMAL" else "🟢")
+chg_color    = "#16a34a" if mkt_ret_1d >= 0 else "#dc2626"
 
 st.markdown(f"""
-<div class='info-card {regime_css}' style='padding:10px 20px;margin-bottom:6px;'>
-  <span style='font-size:1.3em;font-weight:800;'>📈 NSE Swing Dashboard</span>
-  &emsp;
-  <span style='font-size:1.05em'><b>Nifty</b> {nifty_close:,.0f}
-  &nbsp;<span style='color:{"#00e676" if mkt_ret_1d>=0 else "#ff1744"}'>{mkt_ret_1d:+.2f}%</span></span>
-  &emsp;
-  <b>Regime:</b> {regime_emoji}
-  &emsp;
-  <b>VIX:</b> {vol_emoji} {vix_raw:.1f}
-  &emsp;
-  <b>EMA50:</b> {nifty_50dma:,.0f} &nbsp;|&nbsp; <b>EMA200:</b> {nifty_200dma:,.0f}
-  &emsp;
-  <span style='font-size:0.8em;color:#90a4ae'>{date.today().strftime("%d %b %Y")}</span>
+<div class='regime-banner'>
+  <div>
+    <div style='font-size:1.25rem;font-weight:800;color:#1e293b'>NSE Swing Intelligence</div>
+    <div style='font-size:0.75rem;color:#64748b'>{date.today().strftime("%A, %d %B %Y")}</div>
+  </div>
+  <div style='flex:1'></div>
+  <div style='text-align:center'>
+    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>NIFTY 50</div>
+    <div style='font-size:1.1rem;font-weight:700;color:#1e293b'>{nifty_close:,.0f}
+      <span style='color:{chg_color};font-size:0.9rem'>{mkt_ret_1d:+.2f}%</span>
+    </div>
+  </div>
+  <div style='text-align:center'>
+    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>REGIME</div>
+    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{regime_icon} {regime_label}</div>
+  </div>
+  <div style='text-align:center'>
+    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>VIX</div>
+    <div style='font-size:0.95rem;font-weight:700;color:#1e293b'>{vix_icon} {vix_raw:.1f}</div>
+  </div>
+  <div style='text-align:center'>
+    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>EMA50</div>
+    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{nifty_50dma:,.0f}</div>
+  </div>
+  <div style='text-align:center'>
+    <div style='font-size:0.68rem;color:#64748b;font-weight:600'>EMA200</div>
+    <div style='font-size:0.95rem;font-weight:600;color:#1e293b'>{nifty_200dma:,.0f}</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
 if trend_regime == "BEAR":
-    st.warning("⚠️ **BEAR Regime** — New long entries blocked. Showing scores for monitoring only.")
+    st.warning("⚠️ Bear regime active — new long entries blocked. Scores shown for monitoring only.")
 elif vol_regime in ("HIGH", "EXTREME"):
-    st.warning(f"⚠️ **VIX {vol_regime}** ({vix_raw:.1f}) — Reduce position sizes.")
+    st.warning(f"⚠️ VIX elevated ({vix_raw:.1f}) — reduce position sizes.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💼 Portfolio", "🗺 Sectors", "🔬 Deep Dive"])
+tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Portfolio", "Sectors", "Deep Dive"])
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # TAB 1 — DASHBOARD
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 
 with tab1:
-    with st.spinner("Running signal scan on Nifty 50…"):
+    with st.spinner("Running signal scan…"):
         scan_df = run_scan()
 
+    # ── Apply quick filters ──────────────────────────────────────────
+    filtered_df = scan_df.copy() if not scan_df.empty else pd.DataFrame()
+    if not filtered_df.empty:
+        if sig_filter:
+            filtered_df = filtered_df[filtered_df["Signal"].isin(sig_filter)]
+        if sect_filter:
+            filtered_df = filtered_df[filtered_df["Sector"].isin(sect_filter)]
+        filtered_df = filtered_df[filtered_df["BUY%"] >= min_conf]
+        filtered_df = filtered_df[
+            (filtered_df["RSI"] >= rsi_range[0]) & (filtered_df["RSI"] <= rsi_range[1])
+        ]
+
+    # ── Top 3 Actionable Signals ─────────────────────────────────────
+    if not scan_df.empty:
+        top3 = scan_df[scan_df["Signal"] == "BUY"].head(3)
+        if top3.empty:
+            top3 = scan_df[scan_df["Signal"] == "WATCH"].head(3)
+
+        if not top3.empty:
+            st.markdown("#### Top Signals Today")
+            t_cols = st.columns(len(top3))
+            for col, (_, row) in zip(t_cols, top3.iterrows()):
+                sig   = row["Signal"]
+                grade = row.get("Grade", "")
+                color = SIGNAL_COLORS[sig]
+                bg    = SIGNAL_BG[sig]
+                conf_w = int(row["BUY%"])
+                expl  = explain_signal(sig, row.get("Passed",""), row.get("Blockers",""),
+                                        row["BUY%"], grade)
+                stop_s  = f"<br><span style='color:#64748b;font-size:0.75rem'>Stop ₹{row['Stop']:,.1f}</span>" if pd.notna(row.get("Stop")) else ""
+                tgt_s   = f" · Target ₹{row['Target']:,.1f}" if pd.notna(row.get("Target")) else ""
+                col.markdown(f"""
+<div class='top-signal-card' style='border-top: 3px solid {color}'>
+  <div style='display:flex;justify-content:space-between;align-items:center'>
+    <span style='font-size:1.05rem;font-weight:800;color:#1e293b'>{row['Symbol']}</span>
+    <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
+  </div>
+  <div style='color:#334155;font-size:1.0rem;font-weight:700;margin:4px 0'>₹{row['Price']:,.1f}
+    <span style='font-size:0.82rem;color:{"#16a34a" if row["1D%"]>=0 else "#dc2626"}'>{row["1D%"]:+.2f}%</span>
+  </div>
+  <div style='font-size:0.72rem;color:#64748b'>RSI {row['RSI']:.0f} · ADX {row['ADX']:.0f} · Vol×{row['VolRatio']:.1f}</div>
+  <div style='margin:6px 0'>
+    <div style='font-size:0.68rem;color:#64748b;margin-bottom:2px'>Confidence {conf_w}%</div>
+    <div class='conf-bar-wrap'>
+      <div class='conf-bar-fill' style='width:{conf_w}%;background:{color}'></div>
+    </div>
+  </div>
+  {stop_s}{tgt_s}
+  <div style='font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4'>{expl}</div>
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # ── Main layout: table | chart ────────────────────────────────────
     left_col, right_col = st.columns([1.1, 2.7], gap="medium")
 
-    # ── Signal scan table ────────────────────────────────────────────────────
     with left_col:
-        st.markdown("#### 🔍 Signal Scan")
+        st.markdown("#### Signal Scan")
 
         if scan_df.empty:
             st.info("No scan data — model may need retraining.")
         else:
-            display_df = scan_df if not sig_filter else scan_df[scan_df["Signal"].isin(sig_filter)]
-
             sig_counts = scan_df["Signal"].value_counts()
             b1, b2, b3, b4 = st.columns(4)
-            for col, sig, emoji in [(b1,"BUY","🟢"),(b2,"WATCH","🟡"),(b3,"HOLD","⚪"),(b4,"SELL","🔴")]:
-                col.metric(f"{emoji} {sig}", sig_counts.get(sig, 0))
+            for col_m, sig, icon in [(b1,"BUY","🟢"),(b2,"WATCH","🟡"),(b3,"HOLD","⚪"),(b4,"SELL","🔴")]:
+                col_m.metric(f"{icon} {sig}", sig_counts.get(sig, 0))
 
-            show_cols = ["Symbol", "Price", "1D%", "Signal", "Grade", "BUY%", "Confs", "RSI"]
+            show_cols = ["Symbol","Price","1D%","Signal","Grade","BUY%","Confs","RSI"]
 
             def _style_row(row):
                 styles = []
                 for col in row.index:
-                    sig = row.get("Signal", "HOLD")
+                    sig = row.get("Signal","HOLD")
                     if col == "Signal":
-                        bg = {"BUY":"#003d1f","WATCH":"#3d3200","SELL":"#3d0000"}.get(sig,"")
-                        fg = {"BUY":"#00e676","WATCH":"#ffeb3b","SELL":"#ff1744"}.get(sig,"#78909c")
-                        styles.append(f"background:{bg};color:{fg};font-weight:700")
+                        bg = {"BUY":"#dcfce7","WATCH":"#fef9c3","SELL":"#fee2e2"}.get(sig,"#f1f5f9")
+                        fg = {"BUY":"#15803d","WATCH":"#a16207","SELL":"#b91c1c"}.get(sig,"#64748b")
+                        styles.append(f"background:{bg};color:{fg};font-weight:700;border-radius:6px")
                     elif col == "1D%" and pd.notna(row.get("1D%")):
-                        fg = "#00e676" if row["1D%"] >= 0 else "#ef5350"
-                        styles.append(f"color:{fg}")
+                        styles.append(f"color:{'#16a34a' if row['1D%']>=0 else '#dc2626'}")
                     elif col == "Grade":
-                        fg = {"A":"#ffd700","B":"#c0c0c0","C":"#cd7f32"}.get(row.get("Grade",""),"#78909c")
+                        fg = {"A":"#b45309","B":"#4b5563","C":"#6b7280"}.get(row.get("Grade",""),"#94a3b8")
                         styles.append(f"color:{fg};font-weight:700")
                     else:
-                        styles.append("")
+                        styles.append("color:#334155")
                 return styles
 
+            disp = filtered_df[show_cols] if not filtered_df.empty else pd.DataFrame(columns=show_cols)
             styled = (
-                display_df[show_cols].style
+                disp.style
                 .apply(_style_row, axis=1)
-                .format({
-                    "Price": "₹{:,.1f}",
-                    "1D%":   "{:+.2f}%",
-                    "BUY%":  "{:.1f}",
-                })
+                .format({"Price": "₹{:,.1f}", "1D%": "{:+.2f}%", "BUY%": "{:.1f}"})
             )
-
             try:
                 event = st.dataframe(
-                    styled, use_container_width=True, height=460,
-                    on_select="rerun", selection_mode="single-row",
-                    key="scan_table",
+                    styled, use_container_width=True, height=440,
+                    on_select="rerun", selection_mode="single-row", key="scan_table",
                 )
-                if event.selection and event.selection.rows:
-                    idx = event.selection.rows[0]
-                    selected_symbol = display_df.iloc[idx]["Symbol"]
+                if event.selection and event.selection.rows and not filtered_df.empty:
+                    selected_symbol = filtered_df.iloc[event.selection.rows[0]]["Symbol"]
             except Exception:
-                st.dataframe(styled, use_container_width=True, height=460)
+                st.dataframe(styled, use_container_width=True, height=440)
 
             st.download_button(
-                "⬇ Download CSV",
-                scan_df.to_csv(index=False),
+                "⬇ Export CSV", scan_df.to_csv(index=False),
                 file_name=f"nse_signals_{date.today()}.csv",
-                mime="text/csv",
-                use_container_width=True,
+                mime="text/csv", use_container_width=True,
             )
 
-    # ── Chart panel ──────────────────────────────────────────────────────────
     with right_col:
-        st.markdown(f"#### 📊 {selected_symbol}")
+        # Watchlist quick chips
+        if st.session_state.watchlist:
+            wl_display = st.columns(len(st.session_state.watchlist))
+            for wl_c, sym in zip(wl_display, st.session_state.watchlist):
+                if not scan_df.empty:
+                    row_m = scan_df[scan_df["Symbol"] == sym]
+                    sig_m  = row_m.iloc[0]["Signal"] if not row_m.empty else "HOLD"
+                    price_m = row_m.iloc[0]["Price"] if not row_m.empty else 0
+                    chg_m   = row_m.iloc[0]["1D%"]  if not row_m.empty else 0
+                    col_m   = SIGNAL_COLORS.get(sig_m,"#64748b")
+                    wl_c.markdown(f"""
+<div style='background:#fff;border:1px solid #e2e8f0;border-top:3px solid {col_m};
+     border-radius:8px;padding:7px 10px;text-align:center;cursor:pointer'>
+  <div style='font-weight:700;font-size:0.82rem;color:#1e293b'>{sym}</div>
+  <div style='font-size:0.78rem;color:#334155'>₹{price_m:,.0f}</div>
+  <div style='font-size:0.72rem;color:{col_m}'>{sig_m}</div>
+  <div style='font-size:0.7rem;color:{"#16a34a" if chg_m>=0 else "#dc2626"}'>{chg_m:+.1f}%</div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown(f"#### {selected_symbol}")
 
         with st.spinner(f"Loading {selected_symbol}…"):
             stock_df = get_stock_data(selected_symbol, lookback + 250)
@@ -746,14 +1060,47 @@ with tab1:
             vol_ratio  = float(last_row.get("feat_volume_ratio", 1) or 1)
 
             sc = st.columns(8)
-            sc[0].metric("Price",     f"₹{last_price:,.1f}", f"{day_chg:+.2f}%")
-            sc[1].metric("1W",        f"{week_chg:+.2f}%")
-            sc[2].metric("1M",        f"{month_chg:+.2f}%")
-            sc[3].metric("52W High",  f"₹{high52:,.0f}", f"{pct_from_hi:.1f}%")
-            sc[4].metric("ATR",       f"₹{atr_val:,.0f}")
-            sc[5].metric("RSI-14",    f"{rsi_val:.1f}")
-            sc[6].metric("ADX-14",    f"{adx_val:.1f}")
-            sc[7].metric("Vol×Avg",   f"{vol_ratio:.2f}×")
+            sc[0].metric("Price",    f"₹{last_price:,.1f}", f"{day_chg:+.2f}%")
+            sc[1].metric("1W",       f"{week_chg:+.2f}%")
+            sc[2].metric("1M",       f"{month_chg:+.2f}%")
+            sc[3].metric("52W High", f"₹{high52:,.0f}", f"{pct_from_hi:.1f}%")
+            sc[4].metric("ATR",      f"₹{atr_val:,.0f}")
+            sc[5].metric("RSI-14",   f"{rsi_val:.1f}")
+            sc[6].metric("ADX-14",   f"{adx_val:.1f}")
+            sc[7].metric("Vol×Avg",  f"{vol_ratio:.2f}×")
+
+            # Stock intelligence
+            intel = classify_stock_state(last_row)
+            pills_html = ""
+            for label, (text, cls) in [("Trend", intel["trend"]), ("Momentum", intel["momentum"]),
+                                        ("Volatility", intel["volatility"]), ("State", intel["state"])]:
+                pills_html += f"<span style='font-size:0.68rem;color:#64748b;margin-right:2px'>{label}:</span>"
+                pills_html += f"<span class='intel-pill {cls}'>{text}</span> &nbsp;"
+            st.markdown(f"<div style='margin:4px 0 8px'>{pills_html}</div>", unsafe_allow_html=True)
+
+            # Signal card with explanation
+            if not scan_df.empty:
+                sr_row = scan_df[scan_df["Symbol"] == selected_symbol]
+                if not sr_row.empty:
+                    sr     = sr_row.iloc[0]
+                    sig    = sr["Signal"]
+                    color  = SIGNAL_COLORS.get(sig, "#64748b")
+                    bg     = SIGNAL_BG.get(sig, "#f1f5f9")
+                    grade  = sr.get("Grade","")
+                    expl   = explain_signal(sig, sr.get("Passed",""), sr.get("Blockers",""), sr["BUY%"], grade)
+                    stop_s = f"Stop <b>₹{sr['Stop']:,.1f}</b> &nbsp;" if pd.notna(sr.get("Stop")) else ""
+                    tgt_s  = f"Target <b>₹{sr['Target']:,.1f}</b>" if pd.notna(sr.get("Target")) else ""
+                    pass_s = f"<span style='font-size:0.72rem;color:#64748b'>Gates: {sr['Passed']}</span>" if sr.get("Passed") else ""
+                    st.markdown(f"""
+<div class='card' style='border-left:4px solid {color};margin-bottom:8px;background:{bg}20'>
+  <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>
+    <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
+    <span style='font-size:0.85rem;color:#334155'>BUY% <b>{sr['BUY%']}</b> &nbsp; Confs <b>{sr['Confs']}</b> &nbsp; Rank <b>#{sr['Rank']}</b></span>
+    <span style='font-size:0.85rem;color:#334155'>{stop_s}{tgt_s}</span>
+  </div>
+  <div style='font-size:0.78rem;color:#475569;margin-bottom:4px'>{expl}</div>
+  {pass_s}
+</div>""", unsafe_allow_html=True)
 
             fig = make_chart(
                 stock_df, selected_symbol, lookback,
@@ -763,181 +1110,170 @@ with tab1:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            if not scan_df.empty:
-                sr_row = scan_df[scan_df["Symbol"] == selected_symbol]
-                if not sr_row.empty:
-                    sr = sr_row.iloc[0]
-                    sig = sr["Signal"]
-                    color = SIGNAL_COLORS.get(sig, "#78909c")
-                    grade_html = f" <span class='grade-{sr.get(\"Grade\",\"\")}'>{sr.get('Grade','')}</span>" if sr.get("Grade") else ""
-                    stop_s  = f"Stop <b>₹{sr['Stop']:,.1f}</b> &nbsp;" if pd.notna(sr.get("Stop"))   else ""
-                    tgt_s   = f"Target <b>₹{sr['Target']:,.1f}</b>" if pd.notna(sr.get("Target")) else ""
-                    block_s = f"<br><small style='color:#ffeb3b'>⚠ Blocked: {sr['Blockers']}</small>" if sr.get("Blockers") else ""
-                    pass_s  = f"<br><small style='color:#90a4ae'>✅ {sr['Passed']}</small>" if sr.get("Passed") else ""
-                    st.markdown(f"""
-<div class='info-card' style='border-left:4px solid {color}'>
-  <b style='color:{color};font-size:1.15em'>{sig}</b>{grade_html}
-  &ensp;BUY% <b>{sr['BUY%']}</b>
-  &ensp;Confs <b>{sr['Confs']}</b>
-  &ensp;Rank <b>#{sr['Rank']}</b>
-  &ensp;{stop_s}{tgt_s}
-  {pass_s}{block_s}
-</div>""", unsafe_allow_html=True)
+    # ── News panel ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Market News")
+    with st.spinner("Fetching latest headlines…"):
+        articles = fetch_news(max_per_feed=2)
+
+    if articles:
+        n_cols = st.columns(2)
+        mid = len(articles) // 2
+        for col_n, chunk in zip(n_cols, [articles[:mid], articles[mid:]]):
+            with col_n:
+                html = ""
+                for a in chunk:
+                    html += f"""
+<div class='news-item'>
+  <span class='news-source src-{a["cls"]}'>{a["source"]}</span>
+  <span style='font-size:0.7rem;color:#94a3b8'>{a["pub"]}</span><br>
+  <a href='{a["link"]}' target='_blank'
+     style='color:#1e293b;font-size:0.82rem;font-weight:500;text-decoration:none'>
+    {a["title"]}
+  </a>
+</div>"""
+                st.markdown(f"<div class='card'>{html}</div>", unsafe_allow_html=True)
+    else:
+        st.info("News feeds unavailable — check network connectivity.")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # TAB 2 — PORTFOLIO BUILDER
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 
 with tab2:
-    st.markdown("### 💼 Monthly Portfolio Builder")
+    st.markdown("### Monthly Portfolio Builder")
+    st.markdown("<p style='color:#64748b;font-size:0.88rem'>ATR-based position sizing · max 2% risk per trade · grade-weighted allocation</p>", unsafe_allow_html=True)
 
     pc1, pc2, pc3 = st.columns([1, 1, 2])
     capital = pc1.number_input("Capital (₹)", min_value=10000, max_value=10000000,
                                 value=100000, step=10000, format="%d")
     max_pos = pc2.number_input("Max positions", min_value=1, max_value=10, value=5)
     pc3.markdown(
-        "<div style='padding:8px 0;color:#90a4ae;font-size:0.85rem'>"
-        "Grades A=25–30%, B=20–25%, C=10–15% of capital. "
-        "Cash reserve ≥10%. Max risk per trade 2% of capital."
-        "</div>", unsafe_allow_html=True
+        "<div style='padding:10px 0;color:#64748b;font-size:0.83rem'>"
+        "Grade A → 25–30% allocation · Grade B → 20–25% · Grade C → 10–15%<br>"
+        "Cash reserve ≥ 10% of capital · Max risk per trade: 2%</div>",
+        unsafe_allow_html=True
     )
 
-    if st.button("🏗 Build Portfolio", use_container_width=False, type="primary"):
-        with st.spinner("Running signal scan and building portfolio…"):
+    if st.button("Build Portfolio", type="primary"):
+        with st.spinner("Building portfolio…"):
             if scan_df.empty:
                 scan_df = run_scan()
 
         buys = scan_df[scan_df["Signal"] == "BUY"].copy()
 
         if buys.empty:
-            st.warning("No BUY signals available. Check WATCH list or run again later.")
+            st.warning("No BUY signals — check WATCH list or refresh.")
             watch = scan_df[scan_df["Signal"] == "WATCH"].head(5)
             if not watch.empty:
-                st.markdown("**WATCH list (close to BUY):**")
-                st.dataframe(watch[["Symbol","Price","BUY%","Confs","Blockers"]],
-                             use_container_width=True, hide_index=True)
+                st.markdown("**WATCH candidates (close to BUY):**")
+                st.dataframe(watch[["Symbol","Price","BUY%","Confs","Blockers"]], hide_index=True)
         else:
             grade_alloc = {"A": 0.275, "B": 0.225, "C": 0.125}
             buys = buys.head(int(max_pos))
-
             portfolio_rows = []
-            total_invested = 0
-            total_risk     = 0
+            total_invested = total_risk = 0
 
             for _, row in buys.iterrows():
-                grade   = row.get("Grade", "C") or "C"
-                alloc   = capital * grade_alloc.get(grade, 0.125)
-                alloc   = min(alloc, capital * 0.30)
-                price   = float(row["Price"])
-                stop    = float(row["Stop"]) if pd.notna(row.get("Stop")) else price * 0.95
-                target  = float(row["Target"]) if pd.notna(row.get("Target")) else price * 1.10
+                grade  = row.get("Grade","C") or "C"
+                alloc  = min(capital * grade_alloc.get(grade, 0.125), capital * 0.30)
+                price  = float(row["Price"])
+                stop   = float(row["Stop"])   if pd.notna(row.get("Stop"))   else price * 0.95
+                target = float(row["Target"]) if pd.notna(row.get("Target")) else price * 1.10
                 risk_pp = price - stop
                 if risk_pp <= 0:
                     continue
 
-                max_shares_by_risk = int((capital * 0.02) / risk_pp)
-                shares_by_alloc    = int(alloc / price)
-                shares             = min(max_shares_by_risk, shares_by_alloc)
+                shares = min(int((capital * 0.02) / risk_pp), int(alloc / price))
                 if shares <= 0:
                     shares = 1
 
                 invested   = shares * price
                 risk_trade = shares * risk_pp
                 potential  = shares * (target - price)
-                rr         = round(potential / risk_trade, 2) if risk_trade else 0
+                rr = round(potential / risk_trade, 2) if risk_trade else 0
 
                 total_invested += invested
                 total_risk     += risk_trade
 
                 portfolio_rows.append({
-                    "#":          len(portfolio_rows) + 1,
-                    "Stock":      row["Symbol"],
-                    "Sector":     row.get("Sector", ""),
-                    "Grade":      grade,
-                    "Entry ₹":    f"₹{price:,.1f}",
-                    "Shares":     shares,
-                    "Invested ₹": f"₹{invested:,.0f}",
-                    "Stop ₹":     f"₹{stop:,.1f}",
-                    "Target ₹":   f"₹{target:,.1f}",
-                    "Max Risk ₹": f"₹{risk_trade:,.0f}",
-                    "R:R":        f"1:{rr}",
-                    "BUY%":       row["BUY%"],
+                    "#": len(portfolio_rows) + 1,
+                    "Stock": row["Symbol"], "Sector": row.get("Sector",""), "Grade": grade,
+                    "Entry ₹": f"₹{price:,.1f}", "Shares": shares,
+                    "Invested ₹": f"₹{invested:,.0f}", "Stop ₹": f"₹{stop:,.1f}",
+                    "Target ₹": f"₹{target:,.1f}", "Max Risk ₹": f"₹{risk_trade:,.0f}",
+                    "R:R": f"1:{rr}", "BUY%": row["BUY%"],
                 })
 
             if not portfolio_rows:
-                st.error("Could not size any positions. Check stop-loss levels.")
+                st.error("Could not size positions. Check stop-loss levels.")
             else:
                 port_df = pd.DataFrame(portfolio_rows)
+                deployed_pct = total_invested / capital * 100
+                risk_pct_total = total_risk / capital * 100
 
                 st.markdown(f"""
-<div class='info-card' style='border-left:4px solid #00e676'>
-  <b>Capital:</b> ₹{capital:,.0f} &ensp;
-  <b>Deployed:</b> ₹{total_invested:,.0f} ({total_invested/capital*100:.1f}%) &ensp;
-  <b>Cash reserve:</b> ₹{capital-total_invested:,.0f} &ensp;
-  <b>Total risk:</b> ₹{total_risk:,.0f} ({total_risk/capital*100:.1f}%) &ensp;
-  <b>Expected R:R</b> 1:2 (ATR-based)
+<div class='card card-accent-green' style='margin-bottom:12px'>
+  <div style='display:flex;gap:32px;flex-wrap:wrap'>
+    <div><span style='font-size:0.7rem;color:#64748b'>CAPITAL</span><br><b style='color:#1e293b'>₹{capital:,.0f}</b></div>
+    <div><span style='font-size:0.7rem;color:#64748b'>DEPLOYED</span><br><b style='color:#1e293b'>₹{total_invested:,.0f} ({deployed_pct:.1f}%)</b></div>
+    <div><span style='font-size:0.7rem;color:#64748b'>CASH RESERVE</span><br><b style='color:#1e293b'>₹{capital-total_invested:,.0f}</b></div>
+    <div><span style='font-size:0.7rem;color:#dc2626'>TOTAL RISK</span><br><b style='color:#dc2626'>₹{total_risk:,.0f} ({risk_pct_total:.1f}%)</b></div>
+  </div>
 </div>""", unsafe_allow_html=True)
 
-                def _grade_style(val):
-                    return {"A": "color:#ffd700;font-weight:900",
-                            "B": "color:#c0c0c0;font-weight:700",
-                            "C": "color:#cd7f32;font-weight:600"}.get(val, "")
-
-                styled_port = port_df.style.applymap(_grade_style, subset=["Grade"])
+                styled_port = port_df.style.applymap(
+                    lambda v: {"A":"color:#b45309;font-weight:800","B":"color:#4b5563;font-weight:700","C":"color:#6b7280"}.get(v,""),
+                    subset=["Grade"]
+                )
                 st.dataframe(styled_port, use_container_width=True, hide_index=True)
-
-                st.markdown("""
-<div class='info-card'>
-<b>Exit rules:</b>
-&nbsp; ✅ Hit target → close full position &nbsp;
-❌ Hit stop → close, accept loss &nbsp;
-⏰ 10 trading days elapsed → exit if no trigger
-</div>""", unsafe_allow_html=True)
 
                 alloc_vals  = [int(r["Invested ₹"].replace("₹","").replace(",","")) for r in portfolio_rows]
                 alloc_names = [r["Stock"] for r in portfolio_rows]
                 cash_val    = capital - sum(alloc_vals)
                 if cash_val > 0:
-                    alloc_names.append("Cash")
-                    alloc_vals.append(int(cash_val))
+                    alloc_names.append("Cash"); alloc_vals.append(int(cash_val))
 
                 pie_fig = go.Figure(go.Pie(
-                    labels=alloc_names, values=alloc_vals,
-                    hole=0.45, textinfo="label+percent",
-                    marker=dict(colors=px.colors.qualitative.Set2),
+                    labels=alloc_names, values=alloc_vals, hole=0.48,
+                    textinfo="label+percent",
+                    marker=dict(colors=px.colors.qualitative.Pastel),
                 ))
                 pie_fig.update_layout(
-                    template="plotly_dark", paper_bgcolor=C["bg"],
-                    height=340, margin=dict(l=10, r=10, t=30, b=10),
-                    title="Portfolio Allocation", showlegend=False,
+                    template="plotly_white", paper_bgcolor="#ffffff",
+                    height=320, margin=dict(l=10, r=10, t=30, b=10),
+                    title=dict(text="Portfolio Allocation", font=dict(color="#1e293b", size=13)),
+                    showlegend=False,
                 )
                 st.plotly_chart(pie_fig, use_container_width=True)
 
     st.markdown("""
-<div class='info-card'>
-<b>How to use:</b> Set your capital, click Build Portfolio. The system picks top-graded BUY signals,
-sizes each position so max loss ≤ 2% of capital, and shows entry/stop/target levels.
-Re-run every Monday morning before market open for fresh signals.
-<br><br>⚠️ <i>Educational only — not financial advice.</i>
+<div class='card' style='margin-top:12px'>
+  <b style='color:#1e293b'>Exit rules:</b>
+  <span style='color:#334155;font-size:0.85rem'>
+  &nbsp; ✅ Hit target → close full position &nbsp;
+  ❌ Hit stop → close, accept loss &nbsp;
+  ⏰ 10 trading days elapsed → exit if no trigger
+  </span><br>
+  <span style='color:#94a3b8;font-size:0.78rem'>⚠️ Educational only — not financial advice.</span>
 </div>""", unsafe_allow_html=True)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # TAB 3 — SECTOR ANALYSIS
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 
 with tab3:
-    st.markdown("### 🗺 Sector Analysis")
+    st.markdown("### Sector Analysis")
 
-    with st.spinner("Analysing sectors…"):
-        if scan_df.empty:
-            scan_df = run_scan()
+    if scan_df.empty:
+        scan_df = run_scan()
 
     if scan_df.empty:
         st.info("No scan data available.")
     else:
-        sector_df = scan_df.copy()
+        sector_df    = scan_df.copy()
         sector_stats = (
             sector_df.groupby("Sector")
             .agg(
@@ -957,75 +1293,75 @@ with tab3:
 
         with sc_l:
             st.markdown("#### Sector Scorecard")
+
             def _sect_style(row):
                 styles = []
                 for col in row.index:
                     if col == "BUY":
-                        styles.append("color:#00e676;font-weight:700" if row["BUY"] > 0 else "")
+                        styles.append("color:#15803d;font-weight:700" if row["BUY"] > 0 else "color:#334155")
                     elif col == "SELL":
-                        styles.append("color:#ff1744;font-weight:700" if row["SELL"] > 0 else "")
+                        styles.append("color:#b91c1c;font-weight:700" if row["SELL"] > 0 else "color:#334155")
                     elif col == "BUY_rate%":
                         pct = row["BUY_rate%"]
-                        styles.append(f"color:{'#00e676' if pct>30 else '#ffeb3b' if pct>0 else '#78909c'};font-weight:700")
+                        styles.append(f"color:{'#15803d' if pct>30 else '#a16207' if pct>0 else '#64748b'};font-weight:700")
                     elif col == "Avg_1D":
-                        styles.append(f"color:{'#00e676' if row['Avg_1D']>=0 else '#ef5350'}")
+                        styles.append(f"color:{'#16a34a' if row['Avg_1D']>=0 else '#dc2626'}")
                     else:
-                        styles.append("")
+                        styles.append("color:#334155")
                 return styles
 
             styled_s = (
-                sector_stats.rename(columns={"Avg_BUY_pct": "AvgBUY%", "Avg_1D": "Avg1D%"})
+                sector_stats.rename(columns={"Avg_BUY_pct":"AvgBUY%","Avg_1D":"Avg1D%"})
                 .style.apply(_sect_style, axis=1)
-                .format({"AvgBUY%": "{:.1f}", "Avg1D%": "{:+.2f}%", "BUY_rate%": "{:.1f}%"})
+                .format({"AvgBUY%":"{:.1f}","Avg1D%":"{:+.2f}%","BUY_rate%":"{:.1f}%"})
             )
             st.dataframe(styled_s, use_container_width=True, height=420, hide_index=True)
 
         with sc_r:
-            st.markdown("#### BUY Signal Distribution by Sector")
+            st.markdown("#### BUY Signal Distribution")
             bar_fig = go.Figure()
             bar_fig.add_trace(go.Bar(
-                y=sector_stats["Sector"], x=sector_stats["BUY"],
-                name="BUY", orientation="h", marker_color="#00e676",
+                y=sector_stats["Sector"], x=sector_stats["BUY"], name="BUY",
+                orientation="h", marker_color="#86efac",
+                marker_line_color="#16a34a", marker_line_width=1,
                 text=sector_stats["BUY"], textposition="outside",
             ))
             bar_fig.add_trace(go.Bar(
-                y=sector_stats["Sector"], x=sector_stats["WATCH"],
-                name="WATCH", orientation="h", marker_color="#ffeb3b",
+                y=sector_stats["Sector"], x=sector_stats["WATCH"], name="WATCH",
+                orientation="h", marker_color="#fde68a",
+                marker_line_color="#ca8a04", marker_line_width=1,
                 text=sector_stats["WATCH"], textposition="outside",
             ))
             bar_fig.update_layout(
-                template="plotly_dark", paper_bgcolor=C["bg"], plot_bgcolor=C["bg"],
+                template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
                 height=420, barmode="stack",
                 margin=dict(l=10, r=60, t=20, b=10),
-                legend=dict(orientation="h", y=1.05),
+                legend=dict(orientation="h", y=1.05, font=dict(color="#334155")),
                 xaxis_title="Number of stocks",
+                font=dict(color="#334155"),
             )
             st.plotly_chart(bar_fig, use_container_width=True)
 
-        st.markdown("#### Stock-level breakdown by sector")
-        selected_sector = st.selectbox(
-            "Select sector", ["All"] + sorted(sector_df["Sector"].unique().tolist())
-        )
-        filtered = sector_df if selected_sector == "All" else sector_df[sector_df["Sector"] == selected_sector]
-        show_sect_cols = ["Symbol", "Sector", "Price", "1D%", "Signal", "Grade", "BUY%", "Confs", "RSI", "VolRatio"]
-        st.dataframe(
-            filtered[show_sect_cols].reset_index(drop=True),
-            use_container_width=True, height=300, hide_index=True,
-        )
+        st.markdown("#### Stock-level breakdown")
+        selected_sector = st.selectbox("Sector", ["All"] + sorted(sector_df["Sector"].unique().tolist()))
+        filtered_sect = sector_df if selected_sector == "All" else sector_df[sector_df["Sector"] == selected_sector]
+        show_sect_cols = ["Symbol","Sector","Price","1D%","Signal","Grade","BUY%","Confs","RSI","VolRatio"]
+        st.dataframe(filtered_sect[show_sect_cols].reset_index(drop=True),
+                     use_container_width=True, height=300, hide_index=True)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # TAB 4 — DEEP DIVE
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 
 with tab4:
-    st.markdown(f"### 🔬 Deep Dive — {selected_symbol}")
+    st.markdown("### Deep Dive Analysis")
 
     dd_symbol = st.selectbox("Stock", NIFTY_50,
                               index=NIFTY_50.index(selected_symbol) if selected_symbol in NIFTY_50 else 0,
                               key="dd_sym")
 
-    with st.spinner(f"Loading {dd_symbol} data…"):
+    with st.spinner(f"Loading {dd_symbol}…"):
         dd_df = get_stock_data(dd_symbol, 365 + 200)
 
     if dd_df is None or dd_df.empty:
@@ -1035,6 +1371,15 @@ with tab4:
         dd_price = float(dd_last["Close"])
         dd_atr   = float(dd_last.get("ATR", 0) or 0)
 
+        # Intelligence card
+        intel = classify_stock_state(dd_last)
+        i_html = ""
+        for label, (text, cls) in [("Trend", intel["trend"]), ("Momentum", intel["momentum"]),
+                                     ("Volatility", intel["volatility"]), ("State", intel["state"])]:
+            i_html += f"<div style='text-align:center'><div style='font-size:0.65rem;color:#64748b;font-weight:600;margin-bottom:2px'>{label.upper()}</div><span class='intel-pill {cls}'>{text}</span></div>"
+
+        st.markdown(f"<div class='card' style='display:flex;gap:24px;justify-content:flex-start;padding:12px 20px'>{i_html}</div>", unsafe_allow_html=True)
+
         st.markdown("#### Return Profile")
         rc = st.columns(6)
         for i, (label, days) in enumerate([("1D",1),("1W",5),("1M",22),("3M",66),("6M",132),("1Y",252)]):
@@ -1042,27 +1387,30 @@ with tab4:
                 chg = (dd_price / float(dd_df.iloc[-(days+1)]["Close"]) - 1) * 100
                 rc[i].metric(label, f"{chg:+.2f}%")
 
-        st.markdown("#### 7-Gate Confirmation Detail")
-        def gv(col, fb=0.0):
+        st.markdown("#### 7-Gate Confirmation")
+
+        def gv_dd(col, fb=0.0):
             return float(dd_last.get(col, fb) or fb)
 
         gates = {
-            "EMA200 (price > 200-day EMA)": gv("feat_ema200_ratio") > 0,
-            "EMA50  (price > 50-day EMA)":  gv("feat_ema50_ratio")  > 0,
-            "EMA20  (price > 20-day EMA)":  gv("feat_ema20_ratio")  > 0,
-            f"ADX >= {ADX_MIN*100:.0f}":     gv("feat_adx")         >= ADX_MIN,
-            "MACD Histogram >= 0":           gv("feat_macd_hist")   >= 0,
-            "Price near 20-day high":        gv("feat_dist_20d_high") > 0,
-            f"Volume >= {VOLUME_THRESHOLD}x avg": gv("feat_volume_ratio") >= VOLUME_THRESHOLD,
+            "EMA200\n(price > 200d)": gv_dd("feat_ema200_ratio") > 0,
+            "EMA50\n(price > 50d)":   gv_dd("feat_ema50_ratio")  > 0,
+            "EMA20\n(price > 20d)":   gv_dd("feat_ema20_ratio")  > 0,
+            f"ADX ≥ {ADX_MIN*100:.0f}":    gv_dd("feat_adx")         >= ADX_MIN,
+            "MACD hist ≥ 0":          gv_dd("feat_macd_hist")   >= 0,
+            "Near 20d high":          gv_dd("feat_dist_20d_high") > 0,
+            f"Vol ≥ {VOLUME_THRESHOLD}× avg": gv_dd("feat_volume_ratio") >= VOLUME_THRESHOLD,
         }
         g_cols = st.columns(7)
         for i, (label, passed) in enumerate(gates.items()):
             icon  = "✅" if passed else "❌"
-            color = "#00e676" if passed else "#ef5350"
+            bg    = "#dcfce7" if passed else "#fee2e2"
+            color = "#15803d" if passed else "#b91c1c"
             g_cols[i].markdown(
-                f"<div class='info-card' style='text-align:center;padding:8px'>"
-                f"<div style='font-size:1.5rem'>{icon}</div>"
-                f"<div style='font-size:0.68rem;color:{color}'>{label}</div>"
+                f"<div style='background:{bg};border:1px solid {"#86efac" if passed else "#fca5a5"};border-radius:10px;"
+                f"text-align:center;padding:10px 4px'>"
+                f"<div style='font-size:1.3rem'>{icon}</div>"
+                f"<div style='font-size:0.65rem;color:{color};font-weight:600;line-height:1.3'>{label}</div>"
                 f"</div>", unsafe_allow_html=True
             )
 
@@ -1074,25 +1422,21 @@ with tab4:
 
         feat_df = pd.DataFrame([feat_vals])
         feat_fig = go.Figure(go.Heatmap(
-            z=feat_df.values,
-            x=list(feat_vals.keys()),
-            y=[""],
-            colorscale="RdYlGn",
-            showscale=True,
-            text=[[f"{v:.3f}" for v in feat_df.values[0]]],
-            texttemplate="%{text}",
+            z=feat_df.values, x=list(feat_vals.keys()), y=[""],
+            colorscale="RdYlGn", showscale=True,
+            text=[[f"{v:.3f}" for v in feat_df.values[0]]], texttemplate="%{text}",
         ))
         feat_fig.update_layout(
-            template="plotly_dark", paper_bgcolor=C["bg"],
-            height=120, margin=dict(l=10, r=10, t=20, b=40),
+            template="plotly_white", paper_bgcolor="#ffffff",
+            height=110, margin=dict(l=10, r=10, t=10, b=40),
+            font=dict(color="#334155"),
         )
         st.plotly_chart(feat_fig, use_container_width=True)
 
-        st.markdown("#### Rolling BUY Probability (last 90 days)")
+        st.markdown("#### Rolling BUY Probability (90 days)")
         dd_trim = dd_df.tail(90 + 50).copy()
         feat_matrix = np.column_stack(
-            [dd_trim.get(col, pd.Series(0, index=dd_trim.index)).fillna(0).values
-             for col in model_features]
+            [dd_trim.get(col, pd.Series(0, index=dd_trim.index)).fillna(0).values for col in model_features]
         )
         probs = model.predict_proba(feat_matrix)[:, 1]
         dd_trim["prob"] = probs
@@ -1102,35 +1446,34 @@ with tab4:
         prob_fig = go.Figure()
         prob_fig.add_trace(go.Scatter(
             x=dd_trim["DateTime"], y=dd_trim["prob"] * 100,
-            fill="tozeroy",
-            fillcolor="rgba(38,166,154,0.15)",
-            line=dict(color="#26a69a", width=1.5),
-            name="BUY prob %",
+            fill="tozeroy", fillcolor="rgba(22,163,74,0.1)",
+            line=dict(color="#16a34a", width=1.5), name="BUY prob %",
         ))
         prob_fig.add_hline(y=BUY_PROBA * 100, line_dash="dot",
-                           line_color="#00e676", line_width=1.5,
+                           line_color="#16a34a", line_width=1.5,
                            annotation_text=f"BUY threshold {BUY_PROBA*100:.0f}%",
-                           annotation_font_color="#00e676")
+                           annotation_font_color="#16a34a")
         prob_fig.update_layout(
-            template="plotly_dark", paper_bgcolor=C["bg"], plot_bgcolor=C["bg"],
-            height=220, margin=dict(l=10, r=10, t=20, b=10),
+            template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+            height=210, margin=dict(l=10, r=10, t=10, b=10),
             yaxis_title="BUY%", yaxis_range=[0, 100],
+            font=dict(color="#334155"),
         )
         st.plotly_chart(prob_fig, use_container_width=True)
 
         st.markdown("#### Trade Risk Calculator")
         rk1, rk2, rk3 = st.columns(3)
-        trade_capital  = rk1.number_input("Your capital (₹)", value=100000, step=10000, min_value=10000, key="rk_cap")
-        risk_pct       = rk2.slider("Risk per trade (%)", 0.5, 5.0, 1.0, 0.25, key="rk_pct")
-        custom_entry   = rk3.number_input("Entry price (₹)", value=float(round(dd_price, 1)), key="rk_entry")
+        trade_capital = rk1.number_input("Capital (₹)", value=100000, step=10000, min_value=10000, key="rk_cap")
+        risk_pct      = rk2.slider("Risk per trade (%)", 0.5, 5.0, 1.0, 0.25, key="rk_pct")
+        custom_entry  = rk3.number_input("Entry price (₹)", value=float(round(dd_price, 1)), key="rk_entry")
 
-        stop_price   = custom_entry - 1.5 * dd_atr
-        target_price = custom_entry + 3.0 * dd_atr
-        risk_amount  = trade_capital * risk_pct / 100
+        stop_price    = custom_entry - 1.5 * dd_atr
+        target_price  = custom_entry + 3.0 * dd_atr
+        risk_amount   = trade_capital * risk_pct / 100
         risk_per_share = custom_entry - stop_price
-        shares_calc  = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
-        invest_total = shares_calc * custom_entry
-        potential    = shares_calc * (target_price - custom_entry)
+        shares_calc   = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+        invest_total  = shares_calc * custom_entry
+        potential     = shares_calc * (target_price - custom_entry)
 
         ra, rb, rc2, rd, re = st.columns(5)
         ra.metric("Shares",        f"{shares_calc}")
@@ -1146,8 +1489,8 @@ with tab4:
 
 st.divider()
 st.caption(
-    f"Model: v{blob.get('version','2')} · trained {blob.get('trained_at','?')} · "
+    f"Model v{blob.get('version','2')} · trained {blob.get('trained_at','?')} · "
     f"{blob.get('n_train',0):,} samples · {len(model_features)} features · "
     f"val acc {blob.get('val_acc',0)*100:.1f}% · "
-    f"Updated every 30 min  ·  ⚠️ Educational only — not financial advice"
+    f"Auto-refreshes every 30 min · ⚠️ Educational only — not financial advice"
 )
