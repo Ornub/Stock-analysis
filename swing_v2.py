@@ -788,32 +788,46 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
 # =============================================================================
 
 def _add_intraday_overlay(df_out: pd.DataFrame) -> None:
-    """Enrich df_out in-place with Zerodha intraday features.
+    """Enrich df_out in-place with intraday features.
 
-    Adds columns: vwap_ratio, orb_signal, intraday_vol_surge, depth_score.
-    Silently no-ops if Zerodha config is placeholder or token is missing.
+    Tries Zerodha first (if configured); falls back to free yfinance data.
+    Adds: vwap_ratio, orb_signal, intraday_vol_surge, depth_score, intraday_score.
     """
+    def _apply(feats: dict) -> None:
+        df_out["vwap_ratio"]         = df_out["Symbol"].map(lambda s: feats.get(s, {}).get("vwap_ratio",         1.0))
+        df_out["orb_signal"]         = df_out["Symbol"].map(lambda s: feats.get(s, {}).get("orb_signal",         0))
+        df_out["intraday_vol_surge"] = df_out["Symbol"].map(lambda s: feats.get(s, {}).get("intraday_vol_surge", 1.0))
+        df_out["depth_score"]        = df_out["Symbol"].map(lambda s: feats.get(s, {}).get("depth_score",        float("nan")))
+        def _score(row):
+            v = 1.0 if row["vwap_ratio"] > 1.005 else (-1.0 if row["vwap_ratio"] < 0.995 else 0.0)
+            o = float(row["orb_signal"])
+            s = 1.0 if row["intraday_vol_surge"] >= 1.5 else (0.0 if row["intraday_vol_surge"] >= 1.0 else -1.0)
+            return round((v + o + s) / 3, 2)
+        df_out["intraday_score"] = df_out.apply(_score, axis=1)
+
+    # Try Zerodha first
     try:
         from zerodha_data.config import api_key
-        if api_key == "YOUR_API_KEY":
-            return  # credentials not configured yet
-        from zerodha_data import get_kite, get_batch_intraday_features, TokenExpiredError
-        kite    = get_kite()
-        symbols = df_out["Symbol"].tolist()
-        print("[Zerodha] Fetching intraday features…")
-        feats   = get_batch_intraday_features(symbols, kite=kite)
+        if api_key != "YOUR_API_KEY":
+            from zerodha_data import get_kite, get_batch_intraday_features, TokenExpiredError
+            kite    = get_kite()
+            symbols = df_out["Symbol"].tolist()
+            print("[Zerodha] Fetching intraday features…")
+            feats   = get_batch_intraday_features(symbols, kite=kite)
+            _apply(feats)
+            print("[Zerodha] Intraday overlay applied.")
+            return
+    except Exception:
+        pass
 
-        df_out["vwap_ratio"]         = df_out["Symbol"].map(
-            lambda s: feats.get(s, {}).get("vwap_ratio",         1.0))
-        df_out["orb_signal"]         = df_out["Symbol"].map(
-            lambda s: feats.get(s, {}).get("orb_signal",         0))
-        df_out["intraday_vol_surge"] = df_out["Symbol"].map(
-            lambda s: feats.get(s, {}).get("intraday_vol_surge", 1.0))
-        df_out["depth_score"]        = df_out["Symbol"].map(
-            lambda s: feats.get(s, {}).get("depth_score",        float("nan")))
-        print("[Zerodha] Intraday overlay applied.")
-    except TokenExpiredError as e:
-        print(e)
+    # Free fallback: yfinance (always works, ~15-min delayed)
+    try:
+        from intraday import get_batch_intraday_features as _yf_batch
+        symbols = df_out["Symbol"].tolist()
+        print("[yfinance] Fetching intraday features…")
+        feats   = _yf_batch(symbols)
+        _apply(feats)
+        print("[yfinance] Intraday overlay applied.")
     except Exception:
         pass  # never break the main predict() if intraday is unavailable
 
