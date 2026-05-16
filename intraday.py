@@ -58,20 +58,35 @@ def _today_bars(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── public API ────────────────────────────────────────────────────────────────
 
+def get_today_bars(symbol: str) -> pd.DataFrame | None:
+    """Return today's 5-min OHLCV bars for a symbol (for charting)."""
+    df = _fetch_5min(symbol, days=2)
+    if df is None or df.empty:
+        return None
+    today = _today_bars(df)
+    return today if not today.empty else None
+
+
 def get_intraday_features(symbol: str) -> dict:
     """Compute free intraday features for one NSE symbol.
 
     Returns dict with keys:
         vwap_ratio        float   close / VWAP (>1 = above, bullish)
+        vwap              float   actual VWAP price level
         orb_signal        int     +1 above ORB high / -1 below ORB low / 0
+        orb_high          float   opening-range high price (₹)
+        orb_low           float   opening-range low price (₹)
+        cur_price         float   latest close price
         morning_range_pos float   position in first-15-min range [0, 1]
         intraday_vol_surge float  today vol vs 20d avg at same time (ratio)
         first_hour_return float   % change from open to end of first hour
         data_ok           bool    True if intraday data was successfully fetched
     """
     result = dict(
-        vwap_ratio=1.0, orb_signal=0, morning_range_pos=0.5,
-        intraday_vol_surge=1.0, first_hour_return=0.0, data_ok=False,
+        vwap_ratio=1.0, vwap=float("nan"), orb_signal=0,
+        orb_high=float("nan"), orb_low=float("nan"), cur_price=float("nan"),
+        morning_range_pos=0.5, intraday_vol_surge=1.0,
+        first_hour_return=0.0, data_ok=False,
     )
 
     df = _fetch_5min(symbol, days=2)
@@ -83,10 +98,12 @@ def get_intraday_features(symbol: str) -> dict:
         return result
 
     cur_price = float(today["Close"].iloc[-1])
+    result["cur_price"] = round(cur_price, 2)
 
     # ── VWAP ──────────────────────────────────────────────────────────
     vwap_val = float(_vwap(today).iloc[-1])
     if vwap_val > 0:
+        result["vwap"]       = round(vwap_val, 2)
         result["vwap_ratio"] = round(cur_price / vwap_val, 4)
 
     # ── Opening Range Breakout (first 15 min = first 3 × 5-min bars) ──
@@ -94,6 +111,8 @@ def get_intraday_features(symbol: str) -> dict:
     orb_high = float(orb_bars["High"].max())
     orb_low  = float(orb_bars["Low"].min())
     orb_rng  = orb_high - orb_low
+    result["orb_high"] = round(orb_high, 2)
+    result["orb_low"]  = round(orb_low, 2)
     if orb_rng > 0:
         pos = (cur_price - orb_low) / orb_rng
         result["morning_range_pos"] = round(max(0.0, min(1.0, pos)), 3)
