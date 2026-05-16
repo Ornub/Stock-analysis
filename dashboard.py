@@ -955,8 +955,8 @@ def make_chart(
     signal_color = C["bull"] if show_buy_levels else (C["bear"] if show_sell_levels else "#64748b")
     signal_label = "BUY" if show_buy_levels else ("SELL" if show_sell_levels else "HOLD")
     fig.update_layout(
-        template="plotly_white",
-        paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+        template="plotly_dark",
+        paper_bgcolor="rgba(11,16,32,0)", plot_bgcolor="rgba(17,24,39,0.35)",
         margin=dict(l=10, r=110, t=36, b=10),
         height=720,
         xaxis_rangeslider_visible=False,
@@ -965,31 +965,31 @@ def make_chart(
             orientation="v",
             yanchor="top", y=0.99,
             xanchor="left", x=1.01,
-            font=dict(size=9, color="#64748b"),
-            bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="#e2e8f0", borderwidth=1,
+            font=dict(size=9, color="#94A3B8"),
+            bgcolor="rgba(17,24,39,0.85)",
+            bordercolor="rgba(59,130,246,0.20)", borderwidth=1,
             tracegroupgap=2,
         ),
-        font=dict(family="Inter, -apple-system, sans-serif", size=11, color="#334155"),
+        font=dict(family="Inter, -apple-system, sans-serif", size=11, color="#94A3B8"),
         title=dict(
-            text=(f"<b style='color:#1e293b'>{symbol}</b>"
-                  f"  <span style='color:#334155'>₹{last_price:,.1f}</span>"
+            text=(f"<b style='color:#F8FAFC'>{symbol}</b>"
+                  f"  <span style='color:#94A3B8'>₹{last_price:,.1f}</span>"
                   f"  <span style='color:{signal_color};font-weight:700'> {signal_label}</span>"
                   f"  <span style='color:#94a3b8;font-size:10px'>  BUY% {last_buy_p*100:.0f} · {last_conf}/7 gates</span>"),
             x=0.01, font=dict(size=14),
         ),
-        hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0",
-                        font=dict(size=11, color="#1e293b")),
+        hoverlabel=dict(bgcolor="#111827", bordercolor="rgba(59,130,246,0.30)",
+                        font=dict(size=11, color="#F8FAFC")),
     )
     fig.update_xaxes(
-        gridcolor=C["grid"], showgrid=True, zeroline=False,
-        linecolor="#e2e8f0", tickfont=dict(color="#94a3b8", size=10),
+        gridcolor="rgba(59,130,246,0.08)", showgrid=True, zeroline=False,
+        linecolor="rgba(59,130,246,0.15)", tickfont=dict(color="#94a3b8", size=10),
         showticklabels=False,  # hide on all rows except bottom
     )
     fig.update_xaxes(showticklabels=True, tickfont=dict(color="#94a3b8", size=10), row=4, col=1)
     fig.update_yaxes(
-        gridcolor=C["grid"], showgrid=True, zeroline=False,
-        linecolor="#e2e8f0", tickfont=dict(color="#94a3b8", size=10),
+        gridcolor="rgba(59,130,246,0.08)", showgrid=True, zeroline=False,
+        linecolor="rgba(59,130,246,0.15)", tickfont=dict(color="#94a3b8", size=10),
         ticklen=3,
     )
     fig.update_yaxes(title_text="", row=1, col=1, tickformat=",.0f")
@@ -1012,7 +1012,10 @@ if "watchlist" not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## NSE Swing Intelligence")
+    st.markdown("""<div style='padding:8px 0 12px;border-bottom:1px solid rgba(59,130,246,0.15);margin-bottom:12px'>
+<div style='font-size:0.65rem;font-weight:700;color:#3B82F6;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px'>NSE · AI Terminal</div>
+<div style='font-size:1.1rem;font-weight:800;color:#F8FAFC;font-family:Space Grotesk,sans-serif;line-height:1.2'>Swing<span style='color:#06B6D4'> Intelligence</span></div>
+</div>""", unsafe_allow_html=True)
     st.markdown("---")
 
     # Stock selector
@@ -1111,29 +1114,29 @@ _regime_asterisk = "" if mkt_data_ok else "<span style='color:#ca8a04;font-size:
 st.markdown(f"""
 <div class='regime-banner'>
   <div style='min-width:180px'>
-    <div style='font-size:1.2rem;font-weight:800;color:#1e293b;white-space:nowrap'>NSE Swing Intelligence</div>
+    <div style='font-size:1.2rem;font-weight:800;color:#F8FAFC;white-space:nowrap'>NSE Swing Intelligence</div>
     <div style='font-size:0.72rem;color:#64748b'>{date.today().strftime("%A, %d %B %Y")}</div>
   </div>
   <div style='display:flex;gap:20px;flex-wrap:wrap;align-items:center;justify-content:flex-end;flex:1'>
     <div style='text-align:center;min-width:70px'>
       <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>NIFTY 50</div>
-      <div style='font-size:1rem;font-weight:700;color:#1e293b;white-space:nowrap'>{_nifty_str} <span style='color:{chg_color};font-size:0.82rem'>{_chg_str}</span></div>
+      <div style='font-size:1rem;font-weight:700;color:#F8FAFC;white-space:nowrap'>{_nifty_str} <span style='color:{chg_color};font-size:0.82rem'>{_chg_str}</span></div>
     </div>
     <div style='text-align:center;min-width:90px'>
       <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>REGIME</div>
-      <div style='font-size:0.88rem;font-weight:700;color:#1e293b;white-space:nowrap'>{regime_icon} {regime_label}{_regime_asterisk}</div>
+      <div style='font-size:0.88rem;font-weight:700;color:#F8FAFC;white-space:nowrap'>{regime_icon} {regime_label}{_regime_asterisk}</div>
     </div>
     <div style='text-align:center;min-width:55px'>
       <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>VIX</div>
-      <div style='font-size:0.88rem;font-weight:700;color:#1e293b'>{vix_icon} {_vix_str}</div>
+      <div style='font-size:0.88rem;font-weight:700;color:#F8FAFC'>{vix_icon} {_vix_str}</div>
     </div>
     <div style='text-align:center;min-width:60px'>
       <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>EMA50</div>
-      <div style='font-size:0.88rem;font-weight:600;color:#1e293b'>{_dma50_str}</div>
+      <div style='font-size:0.88rem;font-weight:600;color:#F8FAFC'>{_dma50_str}</div>
     </div>
     <div style='text-align:center;min-width:60px'>
       <div style='font-size:0.65rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>EMA200</div>
-      <div style='font-size:0.88rem;font-weight:600;color:#1e293b'>{_dma200_str}</div>
+      <div style='font-size:0.88rem;font-weight:600;color:#F8FAFC'>{_dma200_str}</div>
     </div>
   </div>
 </div>
@@ -1229,10 +1232,10 @@ with tab1:
                 col.markdown(f"""
 <div class='top-signal-card' style='border-top: 3px solid {color}'>
   <div style='display:flex;justify-content:space-between;align-items:center'>
-    <span style='font-size:1.05rem;font-weight:800;color:#1e293b'>{row['Symbol']}</span>
+    <span style='font-size:1.05rem;font-weight:800;color:#F8FAFC'>{row['Symbol']}</span>
     <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
   </div>
-  <div style='color:#334155;font-size:1.0rem;font-weight:700;margin:4px 0'>₹{row['Price']:,.1f}
+  <div style='color:#CBD5E1;font-size:1.0rem;font-weight:700;margin:4px 0'>₹{row['Price']:,.1f}
     <span style='font-size:0.82rem;color:{"#16a34a" if row["1D%"]>=0 else "#dc2626"}'>{row["1D%"]:+.2f}%</span>
   </div>
   <div style='font-size:0.72rem;color:#64748b'>RSI {row['RSI']:.0f} · ADX {row['ADX']:.0f} · Vol×{row['VolRatio']:.1f}</div>
@@ -1276,10 +1279,10 @@ with tab1:
                 chg_m   = row_m.iloc[0]["1D%"]    if not row_m.empty else 0
                 col_m   = SIGNAL_COLORS.get(sig_m,"#64748b")
                 wl_c.markdown(f"""
-<div style='background:#fff;border:1px solid #e2e8f0;border-top:3px solid {col_m};
+<div style='background:rgba(17,24,39,0.8);border:1px solid rgba(59,130,246,0.15);border-top:3px solid {col_m};
      border-radius:8px;padding:7px 10px;text-align:center;cursor:pointer'>
-  <div style='font-weight:700;font-size:0.82rem;color:#1e293b'>{sym}</div>
-  <div style='font-size:0.78rem;color:#334155'>₹{price_m:,.0f}</div>
+  <div style='font-weight:700;font-size:0.82rem;color:#F8FAFC'>{sym}</div>
+  <div style='font-size:0.78rem;color:#CBD5E1'>₹{price_m:,.0f}</div>
   <div style='font-size:0.72rem;color:{col_m}'>{sig_m}</div>
   <div style='font-size:0.7rem;color:{"#16a34a" if chg_m>=0 else "#dc2626"}'>{chg_m:+.1f}%</div>
 </div>""", unsafe_allow_html=True)
@@ -1344,7 +1347,7 @@ with tab1:
                 if sr.get("ATR_warn"):
                     risk_tags += "<span style='font-size:0.7rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ High ATR — stop wider than normal</span>"
                 if sr.get("WeakBUY"):
-                    risk_tags += "<span style='font-size:0.7rem;background:#f1f5f9;color:#64748b;border-radius:4px;padding:1px 7px'>Grade C + RSI>65 + low volume — HOLD is acceptable</span>"
+                    risk_tags += "<span style='font-size:0.7rem;background:rgba(59,130,246,0.07);color:#64748b;border-radius:4px;padding:1px 7px'>Grade C + RSI>65 + low volume — HOLD is acceptable</span>"
                 sideways_note = ""
                 if trend_regime == "SIDEWAYS" and sig == "BUY":
                     sideways_note = "<div style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:3px 8px;margin-top:4px'>⚠ Sideways regime — lower signal reliability, tighten stop</div>"
@@ -1352,10 +1355,10 @@ with tab1:
 <div class='card' style='border-left:4px solid {color};margin-bottom:8px;background:{bg}20'>
   <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>
     <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
-    <span style='font-size:0.85rem;color:#334155'>BUY% <b>{sr['BUY%']}</b> &nbsp; Confs <b>{sr['Confs']}</b> &nbsp; Rank <b>#{sr['Rank']}</b></span>
-    <span style='font-size:0.85rem;color:#334155'>{stop_s}{tgt_s}</span>
+    <span style='font-size:0.85rem;color:#CBD5E1'>BUY% <b>{sr['BUY%']}</b> &nbsp; Confs <b>{sr['Confs']}</b> &nbsp; Rank <b>#{sr['Rank']}</b></span>
+    <span style='font-size:0.85rem;color:#CBD5E1'>{stop_s}{tgt_s}</span>
   </div>
-  <div style='font-size:0.78rem;color:#475569;margin-bottom:4px'>{expl}</div>
+  <div style='font-size:0.78rem;color:#94A3B8;margin-bottom:4px'>{expl}</div>
   {pass_s}
   {risk_tags}
   {sideways_note}
@@ -1389,7 +1392,7 @@ with tab1:
                         fg = {"A":"#b45309","B":"#4b5563","C":"#6b7280"}.get(row.get("Grade",""),"#94a3b8")
                         styles.append(f"color:{fg};font-weight:700")
                     else:
-                        styles.append("color:#334155")
+                        styles.append("color:#CBD5E1")
                 return styles
 
             show_cols = ["Symbol","Price","1D%","Signal","Grade","BUY%","Confs","RSI"]
@@ -1452,7 +1455,7 @@ with tab1:
   <span class='news-source src-{a["cls"]}'>{a["source"]}</span>
   <span style='font-size:0.7rem;color:#94a3b8'>{a["pub"]}</span><br>
   <a href='{a["link"]}' target='_blank'
-     style='color:#1e293b;font-size:0.82rem;font-weight:500;text-decoration:none'>
+     style='color:#F8FAFC;font-size:0.82rem;font-weight:500;text-decoration:none'>
     {a["title"]}
   </a>
 </div>"""
@@ -1548,9 +1551,9 @@ with tab2:
                 st.markdown(f"""
 <div class='card card-accent-green' style='margin-bottom:12px'>
   <div style='display:flex;gap:32px;flex-wrap:wrap'>
-    <div><span style='font-size:0.7rem;color:#64748b'>CAPITAL</span><br><b style='color:#1e293b'>₹{capital:,.0f}</b></div>
-    <div><span style='font-size:0.7rem;color:#64748b'>DEPLOYED</span><br><b style='color:#1e293b'>₹{total_invested:,.0f} ({deployed_pct:.1f}%)</b></div>
-    <div><span style='font-size:0.7rem;color:#64748b'>CASH RESERVE</span><br><b style='color:#1e293b'>₹{capital-total_invested:,.0f}</b></div>
+    <div><span style='font-size:0.7rem;color:#64748b'>CAPITAL</span><br><b style='color:#F8FAFC'>₹{capital:,.0f}</b></div>
+    <div><span style='font-size:0.7rem;color:#64748b'>DEPLOYED</span><br><b style='color:#F8FAFC'>₹{total_invested:,.0f} ({deployed_pct:.1f}%)</b></div>
+    <div><span style='font-size:0.7rem;color:#64748b'>CASH RESERVE</span><br><b style='color:#F8FAFC'>₹{capital-total_invested:,.0f}</b></div>
     <div><span style='font-size:0.7rem;color:#dc2626'>TOTAL RISK</span><br><b style='color:#dc2626'>₹{total_risk:,.0f} ({risk_pct_total:.1f}%)</b></div>
   </div>
 </div>""", unsafe_allow_html=True)
@@ -1573,17 +1576,17 @@ with tab2:
                     marker=dict(colors=px.colors.qualitative.Pastel),
                 ))
                 pie_fig.update_layout(
-                    template="plotly_white", paper_bgcolor="#ffffff",
+                    template="plotly_dark", paper_bgcolor="rgba(11,16,32,0)",
                     height=320, margin=dict(l=10, r=10, t=30, b=10),
-                    title=dict(text="Portfolio Allocation", font=dict(color="#1e293b", size=13)),
+                    title=dict(text="Portfolio Allocation", font=dict(color="#F8FAFC", size=13)),
                     showlegend=False,
                 )
                 st.plotly_chart(pie_fig, use_container_width=True)
 
     st.markdown("""
 <div class='card' style='margin-top:12px'>
-  <b style='color:#1e293b'>Exit rules:</b>
-  <span style='color:#334155;font-size:0.85rem'>
+  <b style='color:#F8FAFC'>Exit rules:</b>
+  <span style='color:#CBD5E1;font-size:0.85rem'>
   &nbsp; ✅ Hit target → close full position &nbsp;
   ❌ Hit stop → close, accept loss &nbsp;
   ⏰ 10 trading days elapsed → exit if no trigger
@@ -1630,16 +1633,16 @@ with tab3:
                 styles = []
                 for col in row.index:
                     if col == "BUY":
-                        styles.append("color:#15803d;font-weight:700" if row["BUY"] > 0 else "color:#334155")
+                        styles.append("color:#15803d;font-weight:700" if row["BUY"] > 0 else "color:#CBD5E1")
                     elif col == "SELL":
-                        styles.append("color:#b91c1c;font-weight:700" if row["SELL"] > 0 else "color:#334155")
+                        styles.append("color:#b91c1c;font-weight:700" if row["SELL"] > 0 else "color:#CBD5E1")
                     elif col == "BUY_rate%":
                         pct = row["BUY_rate%"]
                         styles.append(f"color:{'#15803d' if pct>30 else '#a16207' if pct>0 else '#64748b'};font-weight:700")
                     elif col == "Avg_1D":
                         styles.append(f"color:{'#16a34a' if row['Avg_1D']>=0 else '#dc2626'}")
                     else:
-                        styles.append("color:#334155")
+                        styles.append("color:#CBD5E1")
                 return styles
 
             styled_s = (
@@ -1665,12 +1668,12 @@ with tab3:
                 text=sector_stats["WATCH"], textposition="outside",
             ))
             bar_fig.update_layout(
-                template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                template="plotly_dark", paper_bgcolor="rgba(11,16,32,0)", plot_bgcolor="rgba(17,24,39,0.35)",
                 height=420, barmode="stack",
                 margin=dict(l=10, r=60, t=20, b=10),
-                legend=dict(orientation="h", y=1.05, font=dict(color="#334155")),
+                legend=dict(orientation="h", y=1.05, font=dict(color="#94A3B8")),
                 xaxis_title="Number of stocks",
-                font=dict(color="#334155"),
+                font=dict(color="#94A3B8"),
             )
             st.plotly_chart(bar_fig, use_container_width=True)
 
@@ -1735,7 +1738,7 @@ with tab4:
             st.markdown(f"""
 <div class='card' style='padding:16px 20px'>
   <div style='font-size:0.72rem;color:#94a3b8;font-weight:600;letter-spacing:.5px'>{dd_symbol} · NSE</div>
-  <div style='font-size:2rem;font-weight:800;color:#1e293b;line-height:1.1'>₹{dd_price:,.1f}</div>
+  <div style='font-size:2rem;font-weight:800;color:#F8FAFC;line-height:1.1'>₹{dd_price:,.1f}</div>
   <div style='font-size:1rem;font-weight:600;color:{chg_col};margin-bottom:8px'>{dd_chg:+.2f}% today</div>
   <div style='display:flex;gap:8px;align-items:center;margin-bottom:10px'>
     <span class='badge badge-{dd_sig}' style='font-size:0.82rem;padding:4px 10px'>{dd_sig}{' ' + dd_grade if dd_grade else ''}</span>
@@ -1749,7 +1752,7 @@ with tab4:
   </div>
   <div style='margin-top:10px'>
     <div style='font-size:0.65rem;color:#94a3b8;margin-bottom:3px;font-weight:600'>52-WEEK POSITION — {pos52_pct}%</div>
-    <div style='background:#e2e8f0;border-radius:4px;height:6px;position:relative'>
+    <div style='background:rgba(59,130,246,0.12);border-radius:4px;height:6px;position:relative'>
       <div style='background:{"#16a34a" if pos52_pct>60 else ("#ca8a04" if pos52_pct>30 else "#dc2626")};
            height:6px;border-radius:4px;width:{pos52_pct}%'></div>
     </div>
@@ -1873,17 +1876,17 @@ with tab4:
                 text=f"<b>{cur_prob:.1f}%</b>",
                 showarrow=True, arrowhead=2,
                 font=dict(size=10, color="#16a34a" if cur_prob >= BUY_PROBA * 100 else "#dc2626"),
-                bgcolor="white", bordercolor="#e2e8f0", borderwidth=1,
+                bgcolor="#111827", bordercolor="rgba(59,130,246,0.30)", borderwidth=1,
             )
             prob_fig.update_layout(
-                template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                template="plotly_dark", paper_bgcolor="rgba(11,16,32,0)", plot_bgcolor="rgba(17,24,39,0.35)",
                 height=220, margin=dict(l=10, r=90, t=10, b=30),
                 yaxis=dict(title="", range=[0, 100], ticksuffix="%",
-                           tickfont=dict(size=9, color="#94a3b8"), gridcolor="#f1f5f9"),
-                xaxis=dict(tickfont=dict(size=9, color="#94a3b8"), gridcolor="#f1f5f9"),
+                           tickfont=dict(size=9, color="#94a3b8"), gridcolor="rgba(59,130,246,0.08)"),
+                xaxis=dict(tickfont=dict(size=9, color="#94a3b8"), gridcolor="rgba(59,130,246,0.08)"),
                 showlegend=False,
-                font=dict(color="#334155", size=10),
-                hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0"),
+                font=dict(color="#94A3B8", size=10),
+                hoverlabel=dict(bgcolor="#111827", bordercolor="rgba(59,130,246,0.30)"),
             )
             st.plotly_chart(prob_fig, use_container_width=True)
 
@@ -1907,13 +1910,13 @@ with tab4:
             st.markdown(f"""
 <div class='card' style='padding:14px 16px'>
   <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
-    <div style='text-align:center;padding:8px;background:#f8fafc;border-radius:8px'>
+    <div style='text-align:center;padding:8px;background:rgba(17,24,39,0.6);border-radius:8px'>
       <div style='font-size:0.62rem;color:#94a3b8;font-weight:600'>SHARES</div>
-      <div style='font-size:1.1rem;font-weight:800;color:#1e293b'>{shares_calc}</div>
+      <div style='font-size:1.1rem;font-weight:800;color:#F8FAFC'>{shares_calc}</div>
     </div>
-    <div style='text-align:center;padding:8px;background:#f8fafc;border-radius:8px'>
+    <div style='text-align:center;padding:8px;background:rgba(17,24,39,0.6);border-radius:8px'>
       <div style='font-size:0.62rem;color:#94a3b8;font-weight:600'>INVESTED</div>
-      <div style='font-size:1.1rem;font-weight:800;color:#1e293b'>₹{invest_total:,.0f}</div>
+      <div style='font-size:1.1rem;font-weight:800;color:#F8FAFC'>₹{invest_total:,.0f}</div>
       <div style='font-size:0.65rem;color:#64748b'>{pct_port:.1f}% of capital</div>
     </div>
     <div style='text-align:center;padding:8px;background:#fee2e2;border-radius:8px'>
@@ -1927,7 +1930,7 @@ with tab4:
       <div style='font-size:0.65rem;color:#15803d'>+₹{potential_p:,.0f} potential</div>
     </div>
   </div>
-  <div style='text-align:center;margin-top:10px;padding:6px;background:#f1f5f9;border-radius:6px'>
+  <div style='text-align:center;margin-top:10px;padding:6px;background:rgba(59,130,246,0.07);border-radius:6px'>
     <span style='font-size:0.7rem;color:#64748b'>Reward:Risk = </span>
     <span style='font-size:0.9rem;font-weight:800;color:#16a34a'>1 : {rr:.1f}</span>
     <span style='font-size:0.7rem;color:#94a3b8'> &nbsp;({ATR_STOP_MULT}× / {ATR_TARGET_MULT}× ATR)</span>
@@ -1947,7 +1950,7 @@ with tab4:
             st.markdown(
                 f"<div style='font-size:0.72rem;color:#64748b;margin-bottom:10px'>"
                 f"VWAP · Opening Range Breakout · Volume Surge &nbsp;"
-                f"<span style='background:#f1f5f9;border-radius:4px;padding:1px 7px;"
+                f"<span style='background:rgba(59,130,246,0.07);border-radius:4px;padding:1px 7px;"
                 f"font-weight:600;font-size:0.68rem'>{_intra_src}</span></div>",
                 unsafe_allow_html=True,
             )
@@ -2039,11 +2042,11 @@ with tab4:
                 textfont=dict(size=9, color="#64748b"),
             ))
             bar_fig.update_layout(
-                template="plotly_white", paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                template="plotly_dark", paper_bgcolor="rgba(11,16,32,0)", plot_bgcolor="rgba(17,24,39,0.35)",
                 height=380, margin=dict(l=140, r=60, t=10, b=20),
-                xaxis=dict(gridcolor="#f1f5f9", tickfont=dict(size=9, color="#94a3b8")),
-                yaxis=dict(tickfont=dict(size=9, color="#334155")),
-                font=dict(color="#334155", size=10),
+                xaxis=dict(gridcolor="rgba(59,130,246,0.08)", tickfont=dict(size=9, color="#94a3b8")),
+                yaxis=dict(tickfont=dict(size=9, color="#94A3B8")),
+                font=dict(color="#94A3B8", size=10),
             )
             st.plotly_chart(bar_fig, use_container_width=True)
 
@@ -2160,9 +2163,9 @@ with tab5:
                     )
                 elif col == "rr":
                     v = row.get("rr") or 0
-                    styles.append("color:#16a34a;font-weight:600" if v >= 1.5 else "color:#334155")
+                    styles.append("color:#16a34a;font-weight:600" if v >= 1.5 else "color:#CBD5E1")
                 else:
-                    styles.append("color:#334155")
+                    styles.append("color:#CBD5E1")
             return styles
 
         _base_cols = ["symbol", "combined", "score", "setup", "cur_price",
@@ -2237,7 +2240,7 @@ with tab5:
 <div style='margin:8px 0 4px;font-size:0.6rem;color:#94a3b8;font-weight:700'>ML PROBABILITY</div>
 <div style='display:flex;border-radius:4px;overflow:hidden;height:14px'>
   <div title='SELL {_ml_sel_p:.0%}' style='width:{_s_w}%;background:#fca5a5'></div>
-  <div title='HOLD {_ml_hld_p:.0%}' style='width:{_h_w}%;background:#e2e8f0'></div>
+  <div title='HOLD {_ml_hld_p:.0%}' style='width:{_h_w}%;background:rgba(59,130,246,0.12)'></div>
   <div title='BUY {_ml_buy_p:.0%}'  style='width:{_b_w}%;background:#86efac'></div>
 </div>
 <div style='display:flex;justify-content:space-between;font-size:0.58rem;color:#94a3b8;margin-top:2px'>
@@ -2246,7 +2249,7 @@ with tab5:
 
                 _detail_c1.markdown(f"""<div class='card' style='padding:14px'>
 <div style='font-size:0.62rem;color:#94a3b8;font-weight:700;margin-bottom:4px'>SETUP</div>
-<div style='font-size:0.82rem;font-weight:700;color:#1e293b;margin-bottom:8px'>{_setup}</div>
+<div style='font-size:0.82rem;font-weight:700;color:#F8FAFC;margin-bottom:8px'>{_setup}</div>
 <div style='display:flex;gap:10px;margin-bottom:4px'>
   <div>
     <div style='font-size:0.58rem;color:#94a3b8;font-weight:700'>SCORE</div>
@@ -2257,7 +2260,7 @@ with tab5:
    if _ml_ready else ''}
 </div>
 {_bar_html}
-<hr style='border:none;border-top:1px solid #e2e8f0;margin:10px 0'>
+<hr style='border:none;border-top:1px solid rgba(59,130,246,0.12);margin:10px 0'>
 <div style='display:grid;grid-template-columns:1fr 1fr;gap:6px'>
   <div><div style='font-size:0.58rem;color:#94a3b8;font-weight:700'>ENTRY</div>
        <div style='font-size:0.88rem;font-weight:700'>{"₹{:,.1f}".format(_entry) if _entry else "—"}</div></div>
@@ -2337,15 +2340,15 @@ with tab5:
                     ), row=2, col=1)
 
                     _cfig.update_layout(
-                        template="plotly_white",
-                        paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(11,16,32,0)", plot_bgcolor="rgba(17,24,39,0.35)",
                         height=380,
                         margin=dict(l=10, r=120, t=20, b=10),
                         xaxis_rangeslider_visible=False,
-                        font=dict(color="#334155", size=10),
+                        font=dict(color="#94A3B8", size=10),
                     )
-                    _cfig.update_yaxes(tickfont=dict(size=9), gridcolor="#f1f5f9")
-                    _cfig.update_xaxes(tickfont=dict(size=9), gridcolor="#f1f5f9")
+                    _cfig.update_yaxes(tickfont=dict(size=9), gridcolor="rgba(59,130,246,0.08)")
+                    _cfig.update_xaxes(tickfont=dict(size=9), gridcolor="rgba(59,130,246,0.08)")
                     st.plotly_chart(_cfig, use_container_width=True)
                 else:
                     st.caption("No 5-min data available for today.")
