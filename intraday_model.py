@@ -125,8 +125,8 @@ def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
     """Supertrend: +1 = bullish, -1 = bearish. Vectorised where possible."""
     atr   = _atr(high, low, close, period)
     hl2   = (high + low) / 2
-    upper = (hl2 + mult * atr).values
-    lower = (hl2 - mult * atr).values
+    upper = (hl2 + mult * atr).values.copy()
+    lower = (hl2 - mult * atr).values.copy()
     close_v = close.values
     n = len(close_v)
 
