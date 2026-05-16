@@ -153,8 +153,11 @@ def _compute_levels(f: dict, direction: str) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def score_symbol(symbol: str) -> dict | None:
-    """Score a single symbol for intraday. Returns None if data unavailable."""
+def score_symbol(symbol: str, ml_preds: dict | None = None) -> dict | None:
+    """Score a single symbol for intraday. Returns None if data unavailable.
+
+    ml_preds: optional pre-fetched dict from intraday_model.batch_predict()
+    """
     f = get_intraday_features(symbol)
     if not f.get("data_ok"):
         return None
@@ -162,27 +165,58 @@ def score_symbol(symbol: str) -> dict | None:
     score, setup, direction = _score_and_classify(f)
     levels = _compute_levels(f, direction)
 
+    # Merge ML signal if available
+    ml = (ml_preds or {}).get(symbol, {})
+    ml_signal  = ml.get("signal",     "HOLD")
+    ml_buy_p   = ml.get("buy_prob",   0.33)
+    ml_sell_p  = ml.get("sell_prob",  0.33)
+    ml_conf    = ml.get("confidence", 0.33)
+
+    # Blend: 50% rule-based + 50% ML probability into combined_score (0-100)
+    ml_score = ml_buy_p * 100 if ml_signal == "BUY" else (
+               (1 - ml_sell_p) * 100 if ml_signal == "SELL" else 50
+    )
+    combined = round(0.5 * score + 0.5 * ml_score)
+
     return {
-        "symbol":    symbol,
-        "score":     score,
-        "setup":     setup,
-        "direction": direction,
+        "symbol":       symbol,
+        "score":        score,
+        "combined":     combined,
+        "setup":        setup,
+        "direction":    direction,
+        "ml_signal":    ml_signal,
+        "ml_conf":      round(ml_conf, 3),
+        "ml_buy_prob":  round(ml_buy_p, 3),
+        "ml_sell_prob": round(ml_sell_p, 3),
         **levels,
         **f,
     }
 
 
-def scan_intraday(symbols: list[str]) -> pd.DataFrame:
-    """Score all symbols and return a ranked DataFrame (best score first).
+def scan_intraday(symbols: list[str], use_ml: bool = True) -> pd.DataFrame:
+    """Score all symbols and return a ranked DataFrame.
 
-    Columns: symbol, score, setup, direction, entry, stop, target, rr,
-             vwap_ratio, orb_signal, intraday_vol_surge, first_hour_return, ...
+    When use_ml=True, tries to load and run the ML model; falls back
+    gracefully to rule-based scoring if the model isn't trained yet.
+
+    Sort order: combined score (ML + rule-based blend) descending.
     """
-    rows = [r for sym in symbols if (r := score_symbol(sym)) is not None]
+    ml_preds: dict | None = None
+    if use_ml:
+        try:
+            from intraday_model import batch_predict, MODEL_PATH
+            if MODEL_PATH.exists():
+                ml_preds = batch_predict(symbols)
+        except Exception:
+            pass
+
+    rows = [r for sym in symbols if (r := score_symbol(sym, ml_preds)) is not None]
     if not rows:
         return pd.DataFrame()
+
     df = pd.DataFrame(rows)
-    return df.sort_values("score", ascending=False).reset_index(drop=True)
+    sort_col = "combined" if "combined" in df.columns else "score"
+    return df.sort_values(sort_col, ascending=False).reset_index(drop=True)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
