@@ -1925,76 +1925,109 @@ with tab4:
 
 with tab5:
     from intraday_scan import scan_intraday, market_status, get_today_bars
+    from pathlib import Path as _Path
 
     _ms = market_status()
     _ms_col = "#16a34a" if _ms["open"] else "#64748b"
     _ms_lbl = "OPEN" if _ms["open"] else "CLOSED"
+    _ml_ready = _Path("models/intraday_v1.pkl").exists()
 
-    _hdr_c1, _hdr_c2 = st.columns([3, 1])
+    # ── Header row ────────────────────────────────────────────────────
+    _hdr_c1, _hdr_c2, _hdr_c3 = st.columns([3, 1, 1])
     _hdr_c1.markdown(
         f"<div style='padding:6px 0'>"
         f"<span style='background:{_ms_col};color:#fff;border-radius:4px;"
         f"padding:2px 10px;font-size:0.72rem;font-weight:700'>{_ms_lbl}</span>"
         f"&nbsp; <span style='font-size:0.8rem;color:#64748b'>"
-        f"NSE · {_ms['time_ist']} · {_ms['date_ist']}</span></div>",
+        f"NSE · {_ms['time_ist']} · {_ms['date_ist']}</span>"
+        f"&nbsp; <span style='background:{'#dcfce7' if _ml_ready else '#fef9c3'};"
+        f"color:{'#15803d' if _ml_ready else '#92400e'};border-radius:4px;"
+        f"padding:1px 7px;font-size:0.68rem;font-weight:600'>"
+        f"{'ML model ready' if _ml_ready else 'ML not trained'}</span></div>",
         unsafe_allow_html=True,
     )
-    _do_scan = _hdr_c2.button("🔄 Refresh Scan", use_container_width=True)
+    _do_scan  = _hdr_c2.button("🔄 Refresh", use_container_width=True)
+    _do_train = _hdr_c3.button("🧠 Train ML", use_container_width=True,
+                                help="Train the intraday XGBoost model on 58d of Nifty-50 5-min data (~5 min)")
+
+    if _do_train:
+        with st.spinner("Training intraday ML model on Nifty-50 (58 days × 5-min bars)…"):
+            try:
+                import subprocess, sys as _sys
+                result = subprocess.run(
+                    [_sys.executable, "intraday_model.py", "train"],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if result.returncode == 0:
+                    st.success("Model trained successfully! Refresh the scan to use ML signals.")
+                    st.code(result.stdout[-2000:])
+                else:
+                    st.error("Training failed.")
+                    st.code(result.stderr[-1000:])
+            except Exception as _te:
+                st.error(f"Training error: {_te}")
 
     if _ms["last_hour"]:
-        st.info("Last hour of trading — intraday entries are high-risk. New setups not recommended.")
+        st.info("Last hour of trading — intraday entries are high-risk.")
 
     # ── Scan ──────────────────────────────────────────────────────────
-    _scan_symbols = st.session_state.get("watchlist", []) or NIFTY_50[:20]
+    _scan_symbols = list(st.session_state.get("watchlist", []) or []) + []
     _extra = [s for s in NIFTY_50 if s not in _scan_symbols]
     _scan_symbols = _scan_symbols + _extra[:max(0, 20 - len(_scan_symbols))]
 
     _cache_key = "intraday_scan_df"
     if _do_scan or _cache_key not in st.session_state:
         with st.spinner(f"Scanning {len(_scan_symbols)} symbols…"):
-            st.session_state[_cache_key] = scan_intraday(_scan_symbols)
+            st.session_state[_cache_key] = scan_intraday(_scan_symbols, use_ml=_ml_ready)
 
     _idf = st.session_state.get(_cache_key, pd.DataFrame())
 
     if _idf.empty:
         st.info("No intraday data — market may be closed or data unavailable.")
     else:
-        # ── Summary bar ───────────────────────────────────────────────
+        # ── Summary counts ────────────────────────────────────────────
         _long_n  = (_idf["direction"] == "long").sum()
         _short_n = (_idf["direction"] == "short").sum()
         _none_n  = (_idf["direction"] == "none").sum()
-        _sc1, _sc2, _sc3 = st.columns(3)
+        _ml_buy_n = (_idf.get("ml_signal", pd.Series()) == "BUY").sum() if "ml_signal" in _idf else 0
+        _sc1, _sc2, _sc3, _sc4 = st.columns(4)
         _sc1.metric("Long Setups",  _long_n)
         _sc2.metric("Avoid / Short", _short_n)
         _sc3.metric("No Setup",     _none_n)
+        _sc4.metric("ML BUY signals", _ml_buy_n if _ml_ready else "—")
 
         st.markdown("---")
 
         # ── Picks table ───────────────────────────────────────────────
         st.markdown("#### Intraday Picks")
         _show_all = st.checkbox("Show all (including No Setup)", value=False)
-        _disp_df  = _idf if _show_all else _idf[_idf["direction"] != "none"]
+        _disp_df  = _idf if _show_all else _idf[_idf["direction"] != "none"].copy()
 
         def _style_intra(row):
             styles = []
             for col in row.index:
                 if col == "setup":
-                    if "Strong ORB" in str(row["setup"]):
+                    if "Strong ORB" in str(row.get("setup", "")):
                         styles.append("color:#15803d;font-weight:700")
-                    elif "ORB Breakout" in str(row["setup"]):
+                    elif "ORB Breakout" in str(row.get("setup", "")):
                         styles.append("color:#16a34a;font-weight:600")
-                    elif "Momentum" in str(row["setup"]) or "VWAP Hold" in str(row["setup"]):
+                    elif any(x in str(row.get("setup", "")) for x in ["Momentum", "VWAP Hold"]):
                         styles.append("color:#0369a1;font-weight:600")
-                    elif "Avoid" in str(row["setup"]) or "Selling" in str(row["setup"]) or "Breakdown" in str(row["setup"]):
+                    elif any(x in str(row.get("setup", "")) for x in ["Avoid", "Selling", "Breakdown"]):
                         styles.append("color:#b91c1c;font-weight:600")
                     else:
                         styles.append("color:#94a3b8")
-                elif col == "score":
-                    v = row.get("score", 50)
+                elif col in ("score", "combined"):
+                    v = row.get(col, 50)
                     styles.append(
                         "color:#15803d;font-weight:700" if v >= 70
-                        else ("color:#0369a1;font-weight:600" if v >= 55
-                              else "color:#94a3b8")
+                        else ("color:#0369a1;font-weight:600" if v >= 55 else "color:#94a3b8")
+                    )
+                elif col == "ml_signal":
+                    sig = row.get("ml_signal", "HOLD")
+                    styles.append(
+                        "color:#15803d;font-weight:700" if sig == "BUY"
+                        else ("color:#b91c1c;font-weight:700" if sig == "SELL" else "color:#94a3b8")
                     )
                 elif col == "rr":
                     v = row.get("rr") or 0
@@ -2003,14 +2036,20 @@ with tab5:
                     styles.append("color:#334155")
             return styles
 
-        _tcols = ["symbol", "score", "setup", "cur_price", "entry", "stop", "target", "rr",
-                  "vwap_ratio", "intraday_vol_surge", "first_hour_return"]
-        _tcols = [c for c in _tcols if c in _disp_df.columns]
+        _base_cols = ["symbol", "combined", "score", "setup", "cur_price",
+                      "entry", "stop", "target", "rr",
+                      "vwap_ratio", "intraday_vol_surge", "first_hour_return"]
+        if _ml_ready and "ml_signal" in _disp_df.columns:
+            _base_cols = ["symbol", "ml_signal", "ml_conf", "combined", "score",
+                          "setup", "cur_price", "entry", "stop", "target", "rr",
+                          "intraday_vol_surge"]
+        _tcols = [c for c in _base_cols if c in _disp_df.columns]
         _tfmt  = {
             "cur_price": "₹{:,.1f}", "entry": "₹{:,.1f}",
             "stop": "₹{:,.1f}", "target": "₹{:,.1f}",
             "vwap_ratio": "{:.3f}", "intraday_vol_surge": "{:.2f}×",
             "first_hour_return": "{:+.2f}%",
+            "ml_conf": "{:.0%}",
         }
 
         _styled_intra = (
@@ -2045,29 +2084,60 @@ with tab5:
             _detail_c1, _detail_c2 = st.columns([1, 3])
 
             if _detail_row is not None:
-                _entry  = _detail_row.get("entry")
-                _stop   = _detail_row.get("stop")
-                _target = _detail_row.get("target")
-                _rr     = _detail_row.get("rr")
-                _setup  = _detail_row.get("setup", "—")
-                _score  = _detail_row.get("score", 0)
-                _sc_col = "#15803d" if _score >= 70 else ("#0369a1" if _score >= 55 else "#64748b")
+                _entry    = _detail_row.get("entry")
+                _stop     = _detail_row.get("stop")
+                _target   = _detail_row.get("target")
+                _rr       = _detail_row.get("rr")
+                _setup    = _detail_row.get("setup", "—")
+                _score    = _detail_row.get("score", 0)
+                _combined = _detail_row.get("combined", _score)
+                _sc_col   = "#15803d" if _combined >= 70 else ("#0369a1" if _combined >= 55 else "#64748b")
+                _ml_sig   = _detail_row.get("ml_signal", "—")
+                _ml_buy_p = _detail_row.get("ml_buy_prob", 0)
+                _ml_sel_p = _detail_row.get("ml_sell_prob", 0)
+                _ml_hld_p = _detail_row.get("ml_conf", 0) if _ml_sig == "HOLD" else 1 - _ml_buy_p - _ml_sel_p
+                _ml_sig_col = "#15803d" if _ml_sig == "BUY" else ("#b91c1c" if _ml_sig == "SELL" else "#64748b")
+
+                # ML probability bar (stacked: sell | hold | buy)
+                _bar_html = ""
+                if _ml_ready and _ml_sig != "—":
+                    _s_w = max(4, round(_ml_sel_p * 100))
+                    _h_w = max(4, round(max(0, 1 - _ml_buy_p - _ml_sel_p) * 100))
+                    _b_w = max(4, round(_ml_buy_p * 100))
+                    _bar_html = f"""
+<div style='margin:8px 0 4px;font-size:0.6rem;color:#94a3b8;font-weight:700'>ML PROBABILITY</div>
+<div style='display:flex;border-radius:4px;overflow:hidden;height:14px'>
+  <div title='SELL {_ml_sel_p:.0%}' style='width:{_s_w}%;background:#fca5a5'></div>
+  <div title='HOLD {_ml_hld_p:.0%}' style='width:{_h_w}%;background:#e2e8f0'></div>
+  <div title='BUY {_ml_buy_p:.0%}'  style='width:{_b_w}%;background:#86efac'></div>
+</div>
+<div style='display:flex;justify-content:space-between;font-size:0.58rem;color:#94a3b8;margin-top:2px'>
+  <span>SELL {_ml_sel_p:.0%}</span><span>BUY {_ml_buy_p:.0%}</span>
+</div>"""
 
                 _detail_c1.markdown(f"""<div class='card' style='padding:14px'>
-<div style='font-size:0.62rem;color:#94a3b8;font-weight:700;margin-bottom:6px'>SETUP</div>
-<div style='font-size:0.85rem;font-weight:700;color:#1e293b;margin-bottom:10px'>{_setup}</div>
-<div style='font-size:0.6rem;color:#94a3b8;font-weight:700'>SCORE</div>
-<div style='font-size:1.4rem;font-weight:800;color:{_sc_col}'>{_score}</div>
+<div style='font-size:0.62rem;color:#94a3b8;font-weight:700;margin-bottom:4px'>SETUP</div>
+<div style='font-size:0.82rem;font-weight:700;color:#1e293b;margin-bottom:8px'>{_setup}</div>
+<div style='display:flex;gap:10px;margin-bottom:4px'>
+  <div>
+    <div style='font-size:0.58rem;color:#94a3b8;font-weight:700'>SCORE</div>
+    <div style='font-size:1.3rem;font-weight:800;color:{_sc_col}'>{_combined}</div>
+  </div>
+  {'<div><div style="font-size:0.58rem;color:#94a3b8;font-weight:700">ML SIGNAL</div>' +
+   f'<div style="font-size:1.1rem;font-weight:800;color:{_ml_sig_col}">{_ml_sig}</div></div>'
+   if _ml_ready else ''}
+</div>
+{_bar_html}
 <hr style='border:none;border-top:1px solid #e2e8f0;margin:10px 0'>
 <div style='display:grid;grid-template-columns:1fr 1fr;gap:6px'>
-  <div><div style='font-size:0.6rem;color:#94a3b8;font-weight:700'>ENTRY</div>
-       <div style='font-size:0.9rem;font-weight:700'>{"₹{:,.1f}".format(_entry) if _entry else "—"}</div></div>
-  <div><div style='font-size:0.6rem;color:#dc2626;font-weight:700'>STOP</div>
-       <div style='font-size:0.9rem;font-weight:700;color:#dc2626'>{"₹{:,.1f}".format(_stop) if _stop else "—"}</div></div>
-  <div><div style='font-size:0.6rem;color:#16a34a;font-weight:700'>TARGET</div>
-       <div style='font-size:0.9rem;font-weight:700;color:#16a34a'>{"₹{:,.1f}".format(_target) if _target else "—"}</div></div>
-  <div><div style='font-size:0.6rem;color:#94a3b8;font-weight:700'>R:R</div>
-       <div style='font-size:0.9rem;font-weight:700'>{"1 : " + str(_rr) if _rr else "—"}</div></div>
+  <div><div style='font-size:0.58rem;color:#94a3b8;font-weight:700'>ENTRY</div>
+       <div style='font-size:0.88rem;font-weight:700'>{"₹{:,.1f}".format(_entry) if _entry else "—"}</div></div>
+  <div><div style='font-size:0.58rem;color:#dc2626;font-weight:700'>STOP</div>
+       <div style='font-size:0.88rem;font-weight:700;color:#dc2626'>{"₹{:,.1f}".format(_stop) if _stop else "—"}</div></div>
+  <div><div style='font-size:0.58rem;color:#16a34a;font-weight:700'>TARGET</div>
+       <div style='font-size:0.88rem;font-weight:700;color:#16a34a'>{"₹{:,.1f}".format(_target) if _target else "—"}</div></div>
+  <div><div style='font-size:0.58rem;color:#94a3b8;font-weight:700'>R:R</div>
+       <div style='font-size:0.88rem;font-weight:700'>{"1 : " + str(_rr) if _rr else "—"}</div></div>
 </div></div>""", unsafe_allow_html=True)
 
             # 5-min chart
