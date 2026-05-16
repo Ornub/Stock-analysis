@@ -9,6 +9,7 @@ from __future__ import annotations
 import warnings
 warnings.filterwarnings("ignore")
 
+import math
 import xml.etree.ElementTree as ET
 from datetime import date, timedelta, datetime
 from pathlib import Path
@@ -1021,7 +1022,7 @@ elif vol_regime in ("HIGH", "EXTREME"):
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Portfolio", "Sectors", "Deep Dive"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dashboard", "Portfolio", "Sectors", "Deep Dive", "Intraday"])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1916,6 +1917,239 @@ with tab4:
                 font=dict(color="#334155", size=10),
             )
             st.plotly_chart(bar_fig, use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TAB 5 — INTRADAY PICKS
+# ═══════════════════════════════════════════════════════════════════════
+
+with tab5:
+    from intraday_scan import scan_intraday, market_status, get_today_bars
+
+    _ms = market_status()
+    _ms_col = "#16a34a" if _ms["open"] else "#64748b"
+    _ms_lbl = "OPEN" if _ms["open"] else "CLOSED"
+
+    _hdr_c1, _hdr_c2 = st.columns([3, 1])
+    _hdr_c1.markdown(
+        f"<div style='padding:6px 0'>"
+        f"<span style='background:{_ms_col};color:#fff;border-radius:4px;"
+        f"padding:2px 10px;font-size:0.72rem;font-weight:700'>{_ms_lbl}</span>"
+        f"&nbsp; <span style='font-size:0.8rem;color:#64748b'>"
+        f"NSE · {_ms['time_ist']} · {_ms['date_ist']}</span></div>",
+        unsafe_allow_html=True,
+    )
+    _do_scan = _hdr_c2.button("🔄 Refresh Scan", use_container_width=True)
+
+    if _ms["last_hour"]:
+        st.info("Last hour of trading — intraday entries are high-risk. New setups not recommended.")
+
+    # ── Scan ──────────────────────────────────────────────────────────
+    _scan_symbols = st.session_state.get("watchlist", []) or NIFTY_50[:20]
+    _extra = [s for s in NIFTY_50 if s not in _scan_symbols]
+    _scan_symbols = _scan_symbols + _extra[:max(0, 20 - len(_scan_symbols))]
+
+    _cache_key = "intraday_scan_df"
+    if _do_scan or _cache_key not in st.session_state:
+        with st.spinner(f"Scanning {len(_scan_symbols)} symbols…"):
+            st.session_state[_cache_key] = scan_intraday(_scan_symbols)
+
+    _idf = st.session_state.get(_cache_key, pd.DataFrame())
+
+    if _idf.empty:
+        st.info("No intraday data — market may be closed or data unavailable.")
+    else:
+        # ── Summary bar ───────────────────────────────────────────────
+        _long_n  = (_idf["direction"] == "long").sum()
+        _short_n = (_idf["direction"] == "short").sum()
+        _none_n  = (_idf["direction"] == "none").sum()
+        _sc1, _sc2, _sc3 = st.columns(3)
+        _sc1.metric("Long Setups",  _long_n)
+        _sc2.metric("Avoid / Short", _short_n)
+        _sc3.metric("No Setup",     _none_n)
+
+        st.markdown("---")
+
+        # ── Picks table ───────────────────────────────────────────────
+        st.markdown("#### Intraday Picks")
+        _show_all = st.checkbox("Show all (including No Setup)", value=False)
+        _disp_df  = _idf if _show_all else _idf[_idf["direction"] != "none"]
+
+        def _style_intra(row):
+            styles = []
+            for col in row.index:
+                if col == "setup":
+                    if "Strong ORB" in str(row["setup"]):
+                        styles.append("color:#15803d;font-weight:700")
+                    elif "ORB Breakout" in str(row["setup"]):
+                        styles.append("color:#16a34a;font-weight:600")
+                    elif "Momentum" in str(row["setup"]) or "VWAP Hold" in str(row["setup"]):
+                        styles.append("color:#0369a1;font-weight:600")
+                    elif "Avoid" in str(row["setup"]) or "Selling" in str(row["setup"]) or "Breakdown" in str(row["setup"]):
+                        styles.append("color:#b91c1c;font-weight:600")
+                    else:
+                        styles.append("color:#94a3b8")
+                elif col == "score":
+                    v = row.get("score", 50)
+                    styles.append(
+                        "color:#15803d;font-weight:700" if v >= 70
+                        else ("color:#0369a1;font-weight:600" if v >= 55
+                              else "color:#94a3b8")
+                    )
+                elif col == "rr":
+                    v = row.get("rr") or 0
+                    styles.append("color:#16a34a;font-weight:600" if v >= 1.5 else "color:#334155")
+                else:
+                    styles.append("color:#334155")
+            return styles
+
+        _tcols = ["symbol", "score", "setup", "cur_price", "entry", "stop", "target", "rr",
+                  "vwap_ratio", "intraday_vol_surge", "first_hour_return"]
+        _tcols = [c for c in _tcols if c in _disp_df.columns]
+        _tfmt  = {
+            "cur_price": "₹{:,.1f}", "entry": "₹{:,.1f}",
+            "stop": "₹{:,.1f}", "target": "₹{:,.1f}",
+            "vwap_ratio": "{:.3f}", "intraday_vol_surge": "{:.2f}×",
+            "first_hour_return": "{:+.2f}%",
+        }
+
+        _styled_intra = (
+            _disp_df[_tcols].style
+            .apply(_style_intra, axis=1)
+            .format({k: v for k, v in _tfmt.items() if k in _tcols}, na_rep="—")
+        )
+        try:
+            _evt = st.dataframe(
+                _styled_intra, use_container_width=True, height=320,
+                on_select="rerun", selection_mode="single-row", key="intra_table",
+            )
+            _sel_row = (
+                _disp_df.iloc[_evt.selection.rows[0]]
+                if _evt.selection and _evt.selection.rows and not _disp_df.empty
+                else None
+            )
+        except Exception:
+            st.dataframe(_styled_intra, use_container_width=True, height=320)
+            _sel_row = None
+
+        # ── Selected symbol detail ─────────────────────────────────────
+        if _sel_row is not None:
+            _sym = _sel_row["symbol"]
+        else:
+            _sym = _disp_df.iloc[0]["symbol"] if not _disp_df.empty else None
+
+        if _sym:
+            st.markdown(f"---\n#### {_sym} — Intraday Chart")
+            _detail_row = _idf[_idf["symbol"] == _sym].iloc[0] if not _idf[_idf["symbol"] == _sym].empty else None
+
+            _detail_c1, _detail_c2 = st.columns([1, 3])
+
+            if _detail_row is not None:
+                _entry  = _detail_row.get("entry")
+                _stop   = _detail_row.get("stop")
+                _target = _detail_row.get("target")
+                _rr     = _detail_row.get("rr")
+                _setup  = _detail_row.get("setup", "—")
+                _score  = _detail_row.get("score", 0)
+                _sc_col = "#15803d" if _score >= 70 else ("#0369a1" if _score >= 55 else "#64748b")
+
+                _detail_c1.markdown(f"""<div class='card' style='padding:14px'>
+<div style='font-size:0.62rem;color:#94a3b8;font-weight:700;margin-bottom:6px'>SETUP</div>
+<div style='font-size:0.85rem;font-weight:700;color:#1e293b;margin-bottom:10px'>{_setup}</div>
+<div style='font-size:0.6rem;color:#94a3b8;font-weight:700'>SCORE</div>
+<div style='font-size:1.4rem;font-weight:800;color:{_sc_col}'>{_score}</div>
+<hr style='border:none;border-top:1px solid #e2e8f0;margin:10px 0'>
+<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px'>
+  <div><div style='font-size:0.6rem;color:#94a3b8;font-weight:700'>ENTRY</div>
+       <div style='font-size:0.9rem;font-weight:700'>{"₹{:,.1f}".format(_entry) if _entry else "—"}</div></div>
+  <div><div style='font-size:0.6rem;color:#dc2626;font-weight:700'>STOP</div>
+       <div style='font-size:0.9rem;font-weight:700;color:#dc2626'>{"₹{:,.1f}".format(_stop) if _stop else "—"}</div></div>
+  <div><div style='font-size:0.6rem;color:#16a34a;font-weight:700'>TARGET</div>
+       <div style='font-size:0.9rem;font-weight:700;color:#16a34a'>{"₹{:,.1f}".format(_target) if _target else "—"}</div></div>
+  <div><div style='font-size:0.6rem;color:#94a3b8;font-weight:700'>R:R</div>
+       <div style='font-size:0.9rem;font-weight:700'>{"1 : " + str(_rr) if _rr else "—"}</div></div>
+</div></div>""", unsafe_allow_html=True)
+
+            # 5-min chart
+            with _detail_c2:
+                _bars = get_today_bars(_sym)
+                if _bars is not None and not _bars.empty and _detail_row is not None:
+                    from plotly.subplots import make_subplots
+                    _cfig = make_subplots(
+                        rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.72, 0.28], vertical_spacing=0.04,
+                    )
+                    _cfig.add_trace(go.Candlestick(
+                        x=_bars["DateTime"], open=_bars["Open"], high=_bars["High"],
+                        low=_bars["Low"], close=_bars["Close"],
+                        name=_sym, showlegend=False,
+                        increasing_fillcolor="#bbf7d0", decreasing_fillcolor="#fecaca",
+                        increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
+                        whiskerwidth=0.4, line=dict(width=1),
+                    ), row=1, col=1)
+
+                    # VWAP line
+                    _vwap_v = _detail_row.get("vwap")
+                    if _vwap_v and not (isinstance(_vwap_v, float) and math.isnan(_vwap_v)):
+                        _cfig.add_hline(
+                            y=_vwap_v, line_color="#6366f1", line_width=1.5,
+                            line_dash="dash",
+                            annotation_text=f"VWAP {_vwap_v:,.0f}",
+                            annotation_position="right",
+                            annotation_font_size=9, annotation_font_color="#6366f1",
+                            row=1, col=1,
+                        )
+
+                    # ORB band
+                    _oh = _detail_row.get("orb_high")
+                    _ol = _detail_row.get("orb_low")
+                    if _oh and _ol and not (isinstance(_oh, float) and math.isnan(_oh)):
+                        _cfig.add_hrect(
+                            y0=_ol, y1=_oh, fillcolor="#fef9c3",
+                            opacity=0.3, line_width=0,
+                            row=1, col=1,
+                        )
+                        _cfig.add_hline(
+                            y=_oh, line_color="#ca8a04", line_width=1,
+                            line_dash="dot",
+                            annotation_text=f"ORB H {_oh:,.0f}",
+                            annotation_position="right",
+                            annotation_font_size=9, annotation_font_color="#ca8a04",
+                            row=1, col=1,
+                        )
+                        _cfig.add_hline(
+                            y=_ol, line_color="#ca8a04", line_width=1,
+                            line_dash="dot",
+                            annotation_text=f"ORB L {_ol:,.0f}",
+                            annotation_position="right",
+                            annotation_font_size=9, annotation_font_color="#ca8a04",
+                            row=1, col=1,
+                        )
+
+                    # Volume bars
+                    _vol_colors = [
+                        "#bbf7d0" if c >= o else "#fecaca"
+                        for c, o in zip(_bars["Close"], _bars["Open"])
+                    ]
+                    _cfig.add_trace(go.Bar(
+                        x=_bars["DateTime"], y=_bars["Volume"],
+                        marker_color=_vol_colors, name="Vol", showlegend=False,
+                        marker_opacity=0.7,
+                    ), row=2, col=1)
+
+                    _cfig.update_layout(
+                        template="plotly_white",
+                        paper_bgcolor="#ffffff", plot_bgcolor="#fafafa",
+                        height=380,
+                        margin=dict(l=10, r=120, t=20, b=10),
+                        xaxis_rangeslider_visible=False,
+                        font=dict(color="#334155", size=10),
+                    )
+                    _cfig.update_yaxes(tickfont=dict(size=9), gridcolor="#f1f5f9")
+                    _cfig.update_xaxes(tickfont=dict(size=9), gridcolor="#f1f5f9")
+                    st.plotly_chart(_cfig, use_container_width=True)
+                else:
+                    st.caption("No 5-min data available for today.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
