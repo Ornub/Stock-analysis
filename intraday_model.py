@@ -1,7 +1,7 @@
 """
 intraday_model.py — ML intraday signal engine for NSE stocks.
 
-Implements 21 theories as XGBoost features (50 features total).
+Implements 25 theories as XGBoost features (57 features total).
 
 Architecture — TWO-STAGE MODEL:
   Stage 1 — Direction model (binary: BUY vs SELL)
@@ -55,9 +55,10 @@ BUY_THRESH   = 0.005   # +0.5% → BUY  (high-water mark; cleaner signal)
 SELL_THRESH  = -0.005  # −0.5% → SELL (high-water mark; cleaner signal)
 
 # Stage-1 direction model threshold (BUY/SELL confidence floor)
-DIR_THRESHOLD  = 0.52
+# 0.58 → ~44% emit, ~67% accuracy  |  0.65 → ~12% emit, ~72%  |  0.70 → ~7%, ~74%
+DIR_THRESHOLD  = 0.62
 # Stage-2 HOLD filter threshold (non-HOLD confidence floor)
-HOLD_THRESHOLD = 0.48
+HOLD_THRESHOLD = 0.55
 
 FEATURE_COLS = [
     # ── Theory 1: ORB ─────────────────────────────────────────────────
@@ -105,6 +106,14 @@ FEATURE_COLS = [
     # ── Theory 21: Market-regime (Nifty 50 index context) ────────────
     "nifty_ret_1bar", "nifty_ret_6bar", "nifty_rsi",
     "rel_strength_1bar", "rel_strength_6bar",
+    # ── Theory 22: Intraday position (session high/low distance) ─────
+    "session_high_dist", "session_low_dist",
+    # ── Theory 23: Opening drive (first-3-bar momentum) ──────────────
+    "opening_drive", "opening_drive_vol",
+    # ── Theory 24: Nifty regime (ADX + trend direction) ──────────────
+    "nifty_adx", "nifty_ema_sig",
+    # ── Theory 25: Fast 3-bar MACD (non-lagging momentum) ────────────
+    "macd_fast_hist",
 ]
 
 
@@ -419,18 +428,22 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # ── Per-day features ─────────────────────────────────────────────
     vwap_all, vwap_std_all = _vwap_daily(df)
 
-    orb_signal_s    = pd.Series(0.0,  index=df.index)
-    morning_range_s = pd.Series(0.5,  index=df.index)
-    vwap_pct_s      = pd.Series(0.0,  index=df.index)
-    vwap_dev_norm_s = pd.Series(0.0,  index=df.index)
-    cpr_pos_s       = pd.Series(0.0,  index=df.index)
-    session_pct_s   = pd.Series(0.5,  index=df.index)
-    gap_pct_s       = pd.Series(0.0,  index=df.index)
-    above_pd_high_s = pd.Series(0.0,  index=df.index)
-    dist_pd_high_s  = pd.Series(0.0,  index=df.index)
-    is_power_hr_s   = pd.Series(0.0,  index=df.index)
-    time_sin_s      = pd.Series(0.0,  index=df.index)
-    time_cos_s      = pd.Series(0.0,  index=df.index)
+    orb_signal_s      = pd.Series(0.0,  index=df.index)
+    morning_range_s   = pd.Series(0.5,  index=df.index)
+    vwap_pct_s        = pd.Series(0.0,  index=df.index)
+    vwap_dev_norm_s   = pd.Series(0.0,  index=df.index)
+    cpr_pos_s         = pd.Series(0.0,  index=df.index)
+    session_pct_s     = pd.Series(0.5,  index=df.index)
+    gap_pct_s         = pd.Series(0.0,  index=df.index)
+    above_pd_high_s   = pd.Series(0.0,  index=df.index)
+    dist_pd_high_s    = pd.Series(0.0,  index=df.index)
+    is_power_hr_s     = pd.Series(0.0,  index=df.index)
+    time_sin_s        = pd.Series(0.0,  index=df.index)
+    time_cos_s        = pd.Series(0.0,  index=df.index)
+    session_hi_dist_s = pd.Series(0.0,  index=df.index)
+    session_lo_dist_s = pd.Series(0.0,  index=df.index)
+    opening_drive_s   = pd.Series(0.0,  index=df.index)
+    opening_dvol_s    = pd.Series(1.0,  index=df.index)
 
     prev_ohlc: dict = {}
     TOTAL_BARS = 75  # NSE 5-min bars per day
@@ -473,6 +486,32 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         time_cos_s.loc[idx] = np.cos(angle)
         session_pct_s.loc[idx] = bar_nums / max(n - 1, 1)
 
+        # Theory 22: Session high/low distance (non-lagging real-time position)
+        sess_h = grp["High"].expanding().max().values
+        sess_l = grp["Low"].expanding().min().values
+        with np.errstate(divide="ignore", invalid="ignore"):
+            session_hi_dist_s.loc[idx] = np.clip(
+                np.where(sess_h > 0, (cur / sess_h - 1) * 100, 0), -5, 0)
+            session_lo_dist_s.loc[idx] = np.clip(
+                np.where(sess_l > 0, (cur / sess_l - 1) * 100, 0), 0, 5)
+
+        # Theory 23: Opening drive — first 3-bar direction × ATR-normalized magnitude
+        atr14_day = atr14.loc[idx].values
+        first3_h  = grp["High"].iloc[:min(3, n)].max()
+        first3_l  = grp["Low"].iloc[:min(3, n)].min()
+        open0     = grp["Open"].iloc[0]
+        avg_atr   = atr14_day[:min(3, n)].mean() if min(3, n) > 0 else 1.0
+        if avg_atr > 0 and open0 > 0:
+            drive_mag = (first3_h - first3_l) / avg_atr
+            drive_dir = np.sign(grp["Close"].iloc[min(2, n-1)] - open0)
+        else:
+            drive_mag, drive_dir = 0.0, 0.0
+        opening_drive_s.loc[idx]  = float(np.clip(drive_dir * drive_mag, -5, 5))
+        avg_vol = grp["Volume"].mean()
+        first3_vol = grp["Volume"].iloc[:min(3, n)].mean()
+        opening_dvol_s.loc[idx] = float(np.clip(
+            first3_vol / avg_vol if avg_vol > 0 else 1.0, 0, 5))
+
         prev_ohlc[d] = (grp["High"].max(), grp["Low"].min(), grp["Close"].iloc[-1])
 
     out["orb_signal"]        = orb_signal_s
@@ -484,9 +523,13 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out["gap_pct"]           = gap_pct_s
     out["above_pd_high"]     = above_pd_high_s
     out["dist_pd_high"]      = dist_pd_high_s
-    out["is_power_hour"]     = is_power_hr_s
-    out["time_sin"]          = time_sin_s
-    out["time_cos"]          = time_cos_s
+    out["is_power_hour"]      = is_power_hr_s
+    out["time_sin"]           = time_sin_s
+    out["time_cos"]           = time_cos_s
+    out["session_high_dist"]  = session_hi_dist_s
+    out["session_low_dist"]   = session_lo_dist_s
+    out["opening_drive"]      = opening_drive_s
+    out["opening_drive_vol"]  = opening_dvol_s
 
     # ── Theory 21: Nifty 50 market-regime features ───────────────────
     nifty_df = fetch_nifty_5min(days=60)
@@ -503,10 +546,23 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         sr6 = close.pct_change(6).clip(-0.05, 0.05).fillna(0)
         out["rel_strength_1bar"] = (sr1 - nr1.values).clip(-0.03, 0.03)
         out["rel_strength_6bar"] = (sr6 - nr6.values).clip(-0.05, 0.05)
+        # Theory 24: Nifty regime — ADX strength + EMA trend direction
+        nc_hi  = nc;  nc_lo = nc   # index has no H/L; approximate ADX via close
+        n_adx, _ = _adx(nc_hi, nc_lo, nc, 14)
+        nc_ema21  = _ema(nc, 21)
+        out["nifty_adx"]     = n_adx.fillna(0).values
+        out["nifty_ema_sig"] = np.sign(nc - nc_ema21).fillna(0).values
     else:
         for col in ["nifty_ret_1bar", "nifty_ret_6bar", "nifty_rsi",
-                    "rel_strength_1bar", "rel_strength_6bar"]:
+                    "rel_strength_1bar", "rel_strength_6bar",
+                    "nifty_adx", "nifty_ema_sig"]:
             out[col] = 0.0
+
+    # Theory 25: Fast 3-bar MACD histogram (non-lagging momentum fingerprint)
+    fast_macd  = _ema(close, 3) - _ema(close, 8)
+    fast_sig   = _ema(fast_macd, 5)
+    out["macd_fast_hist"] = ((fast_macd - fast_sig) / roll_std.replace(0, np.nan)
+                             ).clip(-3, 3).fillna(0)
 
     return out[FEATURE_COLS]
 
@@ -664,7 +720,7 @@ def train(symbols: list[str] | None = None, days: int = 58,
         symbols = ["RELIANCE", "HDFCBANK", "TCS", "INFY", "SBIN",
                    "ICICIBANK", "HINDUNILVR", "BAJFINANCE"]
         print("=" * 62)
-        print("TEST TRAIN — 8 symbols · two-stage · 50 features")
+        print("TEST TRAIN — 8 symbols · two-stage · 57 features")
         print("=" * 62)
     else:
         symbols = symbols or NIFTY_50
@@ -785,23 +841,23 @@ def train(symbols: list[str] | None = None, days: int = 58,
     print(f"\n── Stage 1: Direction model  "
           f"(train on {len(X_bs):,} BUY/SELL bars) ──")
     model_dir = XGBClassifier(
-        n_estimators=1000,
+        n_estimators=1500,
         max_depth=5,
-        learning_rate=0.025,
+        learning_rate=0.020,
         subsample=0.75,
         colsample_bytree=0.65,
         colsample_bylevel=0.80,
-        min_child_weight=15,
-        gamma=1.5,
-        reg_alpha=0.15,
-        reg_lambda=1.5,
+        min_child_weight=12,
+        gamma=1.2,
+        reg_alpha=0.12,
+        reg_lambda=1.2,
         eval_metric="logloss",
         objective="binary:logistic",
         tree_method="hist",
         random_state=42,
         n_jobs=-1,
         verbosity=0,
-        early_stopping_rounds=40,
+        early_stopping_rounds=60,
     )
     bs_val  = y_val.isin([1, -1])
     X_bs_v  = X_val[bs_val]
@@ -833,15 +889,15 @@ def train(symbols: list[str] | None = None, days: int = 58,
                             else (n_nh + n_h) / (2 * n_h) * 0.8).values
 
     model_hold = XGBClassifier(
-        n_estimators=600,
+        n_estimators=900,
         max_depth=4,
-        learning_rate=0.035,
+        learning_rate=0.025,
         subsample=0.75,
         colsample_bytree=0.70,
         min_child_weight=20,
-        gamma=2.5,
-        reg_alpha=0.20,
-        reg_lambda=2.5,
+        gamma=2.0,
+        reg_alpha=0.18,
+        reg_lambda=2.0,
         eval_metric="logloss",
         objective="binary:logistic",
         tree_method="hist",
@@ -868,6 +924,22 @@ def train(symbols: list[str] | None = None, days: int = 58,
     print(f"  Directional: {combined['dir_acc']*100:.1f}%  (50%=random)")
     print(f"  Combined   : {combined['combined_acc']*100:.1f}%  "
           f"(on emitted signals only)")
+
+    # Threshold sensitivity — show how combined accuracy and emit rate trade off
+    print("\n── Threshold sensitivity (precision vs coverage) ──")
+    hold_proba_all = model_hold.predict_proba(X_val)[:, 1]
+    dir_proba_all  = model_dir.predict_proba(X_val)[:, 1]
+    for thr in [0.50, 0.55, 0.60, 0.65, 0.70]:
+        emit   = (hold_proba_all >= thr) & ((dir_proba_all >= thr) | (dir_proba_all <= 1-thr))
+        n_e    = emit.sum()
+        if n_e == 0:
+            print(f"  thr={thr:.2f}: no signals"); continue
+        dir_em = (dir_proba_all[emit] >= thr).astype(int)
+        true_d = (y_val.values[emit] == 1).astype(int)
+        acc_e  = float(np.mean(dir_em == true_d))
+        print(f"  thr={thr:.2f}: emit={n_e:4d}/{combined['n_total']:,} "
+              f"({n_e/combined['n_total']*100:4.1f}%)  "
+              f"accuracy={acc_e*100:.1f}%")
 
     # Feature importance from direction model (the more discriminating one)
     imp = pd.Series(model_dir.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
