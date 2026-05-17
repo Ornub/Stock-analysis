@@ -1591,6 +1591,11 @@ with st.sidebar:
 model, blob = load_model()
 if model is None:
     st.error("No trained model found. Run `python swing_v2.py train` first.")
+    st.markdown("""<div class='footnote-box'>
+<b>Setup required:</b> The swing signal model has not been trained yet.<br>
+Run <code>python swing_v2.py train</code> in the terminal, then refresh this page.<br>
+Training takes ~5–10 minutes on NIFTY 50 + NEXT 50 (93 stocks, 7-year history).
+</div>""", unsafe_allow_html=True)
     st.stop()
 model_features = blob.get("features", FEATURE_COLS)
 
@@ -2048,33 +2053,219 @@ with tab1:
                 mime="text/csv",
             )
 
-    # ── News panel ───────────────────────────────────────────────────
+    # ── Market Historical Insights ─────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### Market News")
+    with st.expander("📊 Historical Market Insights — Nifty 50", expanded=False):
+        with st.spinner("Computing historical stats…"):
+            _ins = get_nifty_insights()
+
+        if not _ins:
+            st.info("Historical data unavailable — market data fetch failed.")
+        else:
+            _mnames = _ins["month_names"]
+            _seas   = _ins["seasonality"]
+            _cur_m  = _ins["cur_month"]
+
+            # ── Row 1: Return metrics ──
+            _ic1, _ic2, _ic3, _ic4, _ic5 = st.columns(5)
+            for _col, _label, _val in [
+                (_ic1, "YTD Return",   _ins["ytd_ret"]),
+                (_ic2, "1-Year",       _ins["one_y_ret"]),
+                (_ic3, "3-Year",       _ins["three_y_ret"]),
+                (_ic4, "5-Year",       _ins["five_y_ret"]),
+                (_ic5, "52W from High",_ins["pct_from_hi"]),
+            ]:
+                _c = "#10B981" if _val >= 0 else "#EF4444"
+                _sign = "+" if _val >= 0 else ""
+                _col.markdown(
+                    f"<div class='insight-card'>"
+                    f"<div style='font-size:0.62rem;color:#64748b;letter-spacing:.5px;text-transform:uppercase'>{_label}</div>"
+                    f"<div style='font-size:1.3rem;font-weight:800;color:{_c};margin-top:4px'>{_sign}{_val:.1f}%</div>"
+                    f"</div>", unsafe_allow_html=True
+                )
+
+            st.markdown("<div style='margin:10px 0'></div>", unsafe_allow_html=True)
+
+            # ── Row 2: Seasonality bar chart ──
+            _seas_l, _seas_r = st.columns([2, 1])
+            with _seas_l:
+                _seas_months = [_mnames.get(m, str(m)) for m in range(1, 13)]
+                _seas_vals   = [_seas.get(m, 0) for m in range(1, 13)]
+                _seas_colors = ["rgba(16,185,129,0.7)" if v >= 0 else "rgba(239,68,68,0.65)"
+                                for v in _seas_vals]
+                _seas_fig = go.Figure(go.Bar(
+                    x=_seas_months, y=_seas_vals,
+                    marker_color=_seas_colors,
+                    text=[f"{v:+.1f}%" for v in _seas_vals],
+                    textposition="outside",
+                    textfont=dict(size=9),
+                ))
+                _ct2 = _chart_theme()
+                _seas_fig.update_layout(
+                    template=_ct2["template"],
+                    paper_bgcolor=_ct2["paper_bgcolor"],
+                    plot_bgcolor=_ct2["plot_bgcolor"],
+                    height=220,
+                    margin=dict(l=10, r=10, t=28, b=10),
+                    title=dict(text="Monthly Seasonality (avg % return, 8yr)", font=dict(color=_ct2["title_color"], size=11)),
+                    yaxis=dict(tickformat="+.1f", gridcolor=_ct2["gridcolor"], tickfont=dict(size=9, color=_ct2["font_color"])),
+                    xaxis=dict(tickfont=dict(size=9, color=_ct2["font_color"])),
+                    bargap=0.25,
+                    shapes=[{
+                        "type": "rect", "xref": "x", "yref": "paper",
+                        "x0": _mnames.get(_cur_m, "") + " -0.5" if False else str(_seas_months[_cur_m-1]),
+                        "x1": _seas_months[_cur_m-1],
+                        "y0": 0, "y1": 1,
+                        "fillcolor": "rgba(59,130,246,0.10)",
+                        "line": {"color": "rgba(59,130,246,0.40)", "width": 1},
+                    }] if _cur_m in _seas else [],
+                )
+                st.plotly_chart(_seas_fig, use_container_width=True)
+
+            with _seas_r:
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+                # Current month seasonality
+                _cur_sea = _seas.get(_cur_m, 0)
+                _cur_sea_c = "#10B981" if _cur_sea >= 0 else "#EF4444"
+                st.markdown(f"""<div class='insight-card' style='margin-bottom:8px'>
+<div style='font-size:0.62rem;color:#64748b;letter-spacing:.5px'>THIS MONTH ({_mnames.get(_cur_m,"")})</div>
+<div style='font-size:1.1rem;font-weight:800;color:{_cur_sea_c};margin-top:4px'>Avg {_cur_sea:+.1f}%</div>
+<div style='font-size:0.68rem;color:#64748b;margin-top:2px'>historical avg return</div>
+</div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div class='insight-card' style='margin-bottom:8px'>
+<div style='font-size:0.62rem;color:#64748b;letter-spacing:.5px'>BEST MONTH (hist.)</div>
+<div style='font-size:1.1rem;font-weight:800;color:#10B981;margin-top:4px'>{_ins["best_month"]} +{_ins["best_ret"]:.1f}%</div>
+</div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div class='insight-card'>
+<div style='font-size:0.62rem;color:#64748b;letter-spacing:.5px'>WORST MONTH (hist.)</div>
+<div style='font-size:1.1rem;font-weight:800;color:#EF4444;margin-top:4px'>{_ins["worst_month"]} {_ins["worst_ret"]:+.1f}%</div>
+</div>""", unsafe_allow_html=True)
+
+            # ── Row 3: Yearly returns ──
+            if _ins["yearly_data"]:
+                st.markdown("<div style='margin-top:8px;font-size:0.75rem;color:#64748b;font-weight:600;letter-spacing:.4px'>NIFTY 50 YEARLY RETURNS</div>", unsafe_allow_html=True)
+                _yr_cols = st.columns(len(_ins["yearly_data"]))
+                for _ycol, _yr in zip(_yr_cols, _ins["yearly_data"]):
+                    _yc  = "#10B981" if _yr["ret"] >= 0 else "#EF4444"
+                    _sign = "+" if _yr["ret"] >= 0 else ""
+                    _ycol.markdown(
+                        f"<div style='text-align:center;padding:6px 4px;border-radius:8px;"
+                        f"background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.12)'>"
+                        f"<div style='font-size:0.6rem;color:#64748b'>{_yr['year']}</div>"
+                        f"<div style='font-size:0.88rem;font-weight:700;color:{_yc}'>{_sign}{_yr['ret']}%</div>"
+                        f"</div>", unsafe_allow_html=True
+                    )
+
+    # ── News panel (enhanced) ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(
+        "<div style='display:flex;align-items:center;gap:8px;margin-bottom:10px'>"
+        "<span style='font-size:1.0rem;font-weight:700;color:#F8FAFC'>Market News</span>"
+        "<span style='font-size:0.68rem;color:#64748b'>· live from ET, MC, BS, Reuters, Livemint</span>"
+        "</div>",
+        unsafe_allow_html=True
+    )
     with st.spinner("Fetching latest headlines…"):
-        articles = fetch_news(max_per_feed=2)
+        articles = fetch_news(max_per_feed=4)
 
     if articles:
+        _bull_news = [a for a in articles if a["sentiment"] == "bull"]
+        _bear_news = [a for a in articles if a["sentiment"] == "bear"]
+        _neut_news = [a for a in articles if a["sentiment"] == "neut"]
+
+        # Sentiment tally pill
+        _s_html = (
+            f"<span class='sent-bull'>▲ {len(_bull_news)} bullish</span>"
+            f"<span class='sent-bear' style='margin-left:6px'>▼ {len(_bear_news)} bearish</span>"
+            f"<span class='sent-neut' style='margin-left:6px'>— {len(_neut_news)} neutral</span>"
+        )
+        st.markdown(f"<div style='margin-bottom:10px'>{_s_html}</div>", unsafe_allow_html=True)
+
         n_cols = st.columns(2)
-        mid = max(1, len(articles) // 2)
-        for col_n, chunk in zip(n_cols, [articles[:mid], articles[mid:]]):
-            if not chunk:
+        mid    = max(1, len(articles) // 2)
+        for _col_n, _chunk in zip(n_cols, [articles[:mid], articles[mid:]]):
+            if not _chunk:
                 continue
-            with col_n:
-                news_html = ""
-                for a in chunk:
-                    news_html += f"""
-<div class='news-item'>
-  <span class='news-source src-{a["cls"]}'>{a["source"]}</span>
-  <span style='font-size:0.7rem;color:#94a3b8'>{a["pub"]}</span><br>
-  <a href='{a["link"]}' target='_blank'
-     style='color:#F8FAFC;font-size:0.82rem;font-weight:500;text-decoration:none'>
-    {a["title"]}
+            with _col_n:
+                _news_html = ""
+                for _a in _chunk:
+                    _sent_class = f"sent-{_a['sentiment']}"
+                    _sent_label = {"bull": "▲ Bullish", "bear": "▼ Bearish", "neut": "Neutral"}.get(_a["sentiment"], "")
+                    _news_html += f"""
+<div class='news-card-prem'>
+  <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:5px'>
+    <span class='news-source src-{_a["cls"]}'>{_a["source"]}</span>
+    <div style='display:flex;align-items:center;gap:6px'>
+      <span class='{_sent_class}'>{_sent_label}</span>
+      <span style='font-size:0.65rem;color:#475569'>{_a["pub"]}</span>
+    </div>
+  </div>
+  <a href='{_a["link"]}' target='_blank'
+     style='color:#F8FAFC;font-size:0.82rem;font-weight:600;text-decoration:none;line-height:1.4;display:block'>
+    {_a["title"]}
   </a>
+  {f"<div style='font-size:0.72rem;color:#64748b;margin-top:4px;line-height:1.4'>{_a['desc'][:120]}…</div>" if _a.get("desc") else ""}
 </div>"""
-                st.markdown(f"<div class='card'>{news_html}</div>", unsafe_allow_html=True)
+                st.markdown(_news_html, unsafe_allow_html=True)
     else:
-        st.info("No news from the last 7 days — feeds may be unavailable or returning stale content.")
+        st.info("No news from the last 7 days — feeds may be temporarily unavailable. Refresh to retry.")
+
+    # ── Footnotes / Disclaimers ──────────────────────────────────────
+    st.markdown("---")
+    with st.expander("📋 Model Notes, Gate Legend & Risk Disclaimer", expanded=False):
+        st.markdown("""<div class='footnote-box'>
+<h5>⚠️ Important Disclaimer</h5>
+This tool is for <b>educational purposes only</b>. It does <b>not</b> constitute financial advice, investment
+recommendation, or solicitation to buy or sell securities. Past model performance on historical data
+does not guarantee future results. Markets can and do behave in ways that no model can predict.
+Always conduct your own due diligence before placing any trade.
+
+<h5>🔢 Signal Grades Explained</h5>
+<b>Grade A</b> = 8/8 gates passed (highest conviction) &nbsp;·&nbsp;
+<b>Grade B</b> = 7/8 gates &nbsp;·&nbsp;
+<b>Grade C</b> = 6/8 gates &nbsp;·&nbsp;
+<b>Grade D</b> = fewer than 6 — model score shown for monitoring only.
+
+<h5>⭐ Tier System (OOF BUY Precision)</h5>
+<b>Tier A ★</b> = stock historically had ≥65% BUY precision at the signal threshold (gold badge) —
+signals from these stocks use base probability threshold. &nbsp;·&nbsp;
+<b>Tier B ◈</b> = 55–65% precision — threshold raised +2% as cushion. &nbsp;·&nbsp;
+<b>Tier C ·</b> = &lt;55% precision or insufficient samples — threshold raised +5%, WATCH only unless
+all 8 gates pass. Tier C stocks <b>rarely generate BUY signals</b>.
+
+<h5>🚪 The 8 Gates</h5>
+<b>EMA200</b> — price above 200-day EMA (primary trend filter) &nbsp;·&nbsp;
+<b>EMA50</b> — price above 50-day EMA (medium trend) &nbsp;·&nbsp;
+<b>EMA20</b> — price above 20-day EMA (short trend) &nbsp;·&nbsp;
+<b>ADX</b> — ADX ≥ 20 (trend strength) &nbsp;·&nbsp;
+<b>MACD</b> — MACD histogram ≥ 0 (momentum direction) &nbsp;·&nbsp;
+<b>Breakout</b> — within 3% of 20-day high (price structure) &nbsp;·&nbsp;
+<b>Volume</b> — volume ≥ 1.2× 20-day average (institutional participation) &nbsp;·&nbsp;
+<b>Momentum</b> — blocks BUY when both stock AND Nifty are in simultaneous 3-day decline (bear tape filter).
+
+<h5>📐 R:R (Risk-to-Reward)</h5>
+Stop = Entry − 1.5 × ATR(14) &nbsp;·&nbsp; Target = Entry + 2.5 × ATR(14) &nbsp;·&nbsp; Natural R:R ≈ 1:1.67.
+Actual realized R:R depends on execution price and exit discipline.
+
+<h5>⚡ Known Failure Modes</h5>
+<b>1. Gap-down opens</b>: Model scores are computed on prior-day close. If the stock gaps down at open,
+the stop may already be hit before entry — check pre-market levels. &nbsp;·&nbsp;
+<b>2. Earnings surprises</b>: The model has no earnings calendar awareness. Avoid entering positions
+within 5 trading days of scheduled results. &nbsp;·&nbsp;
+<b>3. Broad market shocks</b> (macro events, geopolitical): The momentum gate partially mitigates this
+but cannot protect against sudden systemic moves. Reduce position sizes during HIGH VIX. &nbsp;·&nbsp;
+<b>4. Data staleness</b>: Signals are computed on last available EOD price. Intraday price action is
+not reflected until after market close. &nbsp;·&nbsp;
+<b>5. March–April seasonality</b>: Historically elevated false-positive rate (end-of-FY institutional
+rebalancing creates misleading volume spikes). Cross-check with broader market context. &nbsp;·&nbsp;
+<b>6. Low-liquidity stocks</b>: Even within Nifty 50, stocks with ATR/Price &gt; 2.5% have wider spreads
+— the ATR_warn flag is triggered for these.
+
+<h5>🔄 Refresh Logic</h5>
+Signal scan: cached 15 min &nbsp;·&nbsp; Market regime: cached 30 min &nbsp;·&nbsp;
+News: cached 5 min &nbsp;·&nbsp; Historical insights: cached 1 hr.
+Use the sidebar "🔄 Refresh Data" button to force-clear all caches.
+</div>""", unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2977,9 +3168,16 @@ with tab5:
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.divider()
-st.caption(
-    f"Model v{blob.get('version','2')} · trained {blob.get('trained_at','?')} · "
-    f"{blob.get('n_train',0):,} samples · {len(model_features)} features · "
-    f"val acc {blob.get('val_acc',0)*100:.1f}% · "
-    f"Auto-refreshes every 30 min · ⚠️ Educational only — not financial advice"
-)
+_stock_tiers_blob = blob.get("stock_tiers", {})
+_tier_a_count = sum(1 for t in _stock_tiers_blob.values() if t == "A")
+_tier_b_count = sum(1 for t in _stock_tiers_blob.values() if t == "B")
+st.markdown(f"""
+<div style='display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 0;
+     border-top:1px solid rgba(59,130,246,0.10);font-size:0.72rem;color:#475569'>
+  <span><b style='color:#64748b'>Model</b> v{blob.get("version","5.1")} · {blob.get("n_train",0):,} samples · {len(model_features)} features</span>
+  <span><b style='color:#64748b'>Trained</b> {blob.get("trained_at","—")}</span>
+  <span><b style='color:#64748b'>Val acc</b> {blob.get("val_acc",0)*100:.1f}%</span>
+  <span><b style='color:#64748b'>Universe</b> {len(_stock_tiers_blob)} stocks · <span style='color:#FCD34D'>Tier A: {_tier_a_count}</span> · <span style='color:#94A3B8'>Tier B: {_tier_b_count}</span></span>
+  <span><b style='color:#64748b'>Cache</b> scan 15 min · market 30 min · news 5 min</span>
+  <span style='color:#EF4444;font-weight:600'>⚠ Educational only — not financial advice. Not SEBI registered.</span>
+</div>""", unsafe_allow_html=True)
