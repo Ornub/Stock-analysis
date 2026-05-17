@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 / Zero One — 3 Videos, One Story</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#0f172a; --card:#1e293b; --border:#334155;
+    --text:#f1f5f9; --muted:#94a3b8; --accent:#6366f1;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
+
+  /* ── HERO ── */
+  .hero{text-align:center;padding:80px 24px 56px;background:linear-gradient(160deg,#0f172a 0%,#1e1b4b 50%,#1a0a2e 100%);border-bottom:1px solid var(--border);position:relative;overflow:hidden;}
+  .hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 50% 0%,rgba(99,102,241,.15),transparent 70%);}
+  .hero-badge{display:inline-block;background:rgba(99,102,241,.2);color:#a5b4fc;border:1px solid rgba(99,102,241,.4);padding:5px 16px;border-radius:999px;font-size:0.8rem;font-weight:600;letter-spacing:.06em;margin-bottom:20px;}
+  .hero h1{font-size:clamp(2rem,6vw,4rem);font-weight:900;line-height:1.1;margin-bottom:16px;}
+  .hero h1 span.g{background:linear-gradient(90deg,#818cf8,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  .hero h1 span.r{background:linear-gradient(90deg,#f87171,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  .hero p{color:var(--muted);max-width:580px;margin:0 auto;font-size:1.05rem;}
+  .hero-chapters{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:32px;}
+  .chapter-pill{background:rgba(255,255,255,.05);border:1px solid var(--border);padding:8px 20px;border-radius:999px;font-size:0.85rem;font-weight:600;cursor:pointer;transition:all .2s;}
+  .chapter-pill:hover,.chapter-pill.active{background:var(--accent);border-color:var(--accent);color:#fff;}
+
+  /* ── LAYOUT ── */
+  .container{max-width:1100px;margin:0 auto;padding:0 24px;}
+
+  /* ── CHAPTER HEADER ── */
+  .chapter{padding:64px 0 8px;}
+  .ch-header{display:flex;align-items:flex-start;gap:20px;margin-bottom:32px;}
+  .ch-num{font-size:4rem;font-weight:900;line-height:1;opacity:.12;flex-shrink:0;font-variant-numeric:tabular-nums;}
+  .ch-meta{}
+  .ch-tag{display:inline-block;padding:3px 12px;border-radius:999px;font-size:0.75rem;font-weight:700;letter-spacing:.05em;margin-bottom:8px;}
+  .ch-title{font-size:1.6rem;font-weight:800;margin-bottom:6px;}
+  .ch-sub{color:var(--muted);font-size:0.95rem;max-width:640px;}
+
+  /* ── CARDS ── */
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:22px;}
+  .g2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px;margin-bottom:20px;}
+  .g3{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px;}
+  .g4{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:20px;}
+
+  /* ── STAT CHIPS ── */
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;text-align:center;}
+  .stat .n{font-size:1.7rem;font-weight:800;margin-bottom:2px;}
+  .stat .l{color:var(--muted);font-size:0.78rem;}
+  .green{color:#34d399;} .red{color:#f87171;} .yellow{color:#fbbf24;} .blue{color:#60a5fa;} .purple{color:#a78bfa;}
+
+  /* ── INSIGHT / CALLOUT ── */
+  .callout{border-radius:0 12px 12px 0;padding:14px 18px;margin:18px 0;font-size:0.92rem;}
+  .callout.accent{background:#1e1b4b;border-left:4px solid #6366f1;}  .callout.accent strong{color:#a5b4fc;}
+  .callout.warn{background:#451a03;border-left:4px solid #f59e0b;}    .callout.warn strong{color:#fbbf24;}
+  .callout.danger{background:#450a0a;border-left:4px solid #ef4444;}  .callout.danger strong{color:#f87171;}
+  .callout.success{background:#052e16;border-left:4px solid #22c55e;} .callout.success strong{color:#4ade80;}
+
+  /* ── FACT TABLE ── */
+  .tbl{width:100%;border-collapse:collapse;font-size:0.88rem;}
+  .tbl th{background:#1e293b;color:var(--muted);padding:9px 13px;text-align:left;font-size:0.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
+  .tbl td{padding:9px 13px;border-bottom:1px solid var(--border);}
+  .tbl tr:last-child td{border-bottom:none;}
+  .tbl-wrap{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:18px 0;}
+  .tag{display:inline-block;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700;}
+  .tg{background:#14532d;color:#4ade80;} .tr{background:#450a0a;color:#f87171;} .ty{background:#451a03;color:#fbbf24;}
+
+  /* ── CHART WRAP ── */
+  .cw{position:relative;height:280px;}
+  .cw-sm{position:relative;height:220px;}
+  .cw-lg{position:relative;height:360px;}
+
+  /* ── KEY LESSONS BOX ── */
+  .lesson{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;display:flex;gap:14px;align-items:flex-start;}
+  .lesson .icon{font-size:1.4rem;flex-shrink:0;margin-top:2px;}
+  .lesson .body strong{display:block;margin-bottom:3px;font-size:.95rem;}
+  .lesson .body span{color:var(--muted);font-size:.85rem;}
+
+  /* ── FINAL STORY ── */
+  .final{background:linear-gradient(135deg,#0f172a,#1e1b4b);border:1px solid #4f46e5;border-radius:20px;padding:48px 32px;text-align:center;margin:56px 0 32px;}
+  .final h2{font-size:clamp(1.4rem,3vw,2rem);font-weight:800;margin-bottom:20px;}
+  .final .story-line{max-width:700px;margin:0 auto 14px;color:var(--muted);font-size:.95rem;line-height:1.7;}
+  .final .story-line strong{color:#f1f5f9;}
+
+  hr{border:none;border-top:1px solid var(--border);margin:40px 0;}
+  footer{text-align:center;padding:32px 24px;color:var(--muted);font-size:.8rem;border-top:1px solid var(--border);}
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════ HERO ══════ -->
+<div class="hero">
+  <div class="hero-badge">3 VIDEOS · DATA-VALIDATED · 01 / ZERO ONE</div>
+  <h1>
+    <span class="g">Money.</span> <span class="r">Reality.</span><br>
+    No BS.
+  </h1>
+  <p>Three videos. Three hard truths about gold, salary, and your home loan. Every claim checked against real Indian market data.</p>
+  <div class="hero-chapters">
+    <div class="chapter-pill">📈 Macro: Gold & Oil 2026</div>
+    <div class="chapter-pill">💼 CTC vs In-Hand Reality</div>
+    <div class="chapter-pill">🏠 The ₹1.5Cr Home Lie</div>
+  </div>
+</div>
+
+<div class="container">
+
+<!-- ══════════════════════════════════════════════ CH 1 ══════ -->
+<div class="chapter" id="ch1">
+  <div class="ch-header">
+    <div class="ch-num" style="color:#818cf8">01</div>
+    <div class="ch-meta">
+      <div class="ch-tag" style="background:rgba(99,102,241,.2);color:#a5b4fc;">MACRO · PORTFOLIO</div>
+      <div class="ch-title">Gold, Oil & the Forex Squeeze — What Should You Actually Do?</div>
+      <div class="ch-sub">India's economy is under pressure from three sides simultaneously. Here's what the data says — and what to do about your portfolio.</div>
+    </div>
+  </div>
+
+  <!-- Validated claims -->
+  <div class="g4">
+    <div class="stat"><div class="n green">+12.4%</div><div class="l">Gold YTD 2026 (video: +13%) ✓</div></div>
+    <div class="stat"><div class="n red">+75.9%</div><div class="l">Crude oil YTD 2026 (video: +77%) ✓</div></div>
+    <div class="stat"><div class="n red">−9.5%</div><div class="l">Nifty YTD 2026 (video: −11%) ✓</div></div>
+    <div class="stat"><div class="n yellow">₹95.7</div><div class="l">USD/INR today (was ₹44 in 2006)</div></div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px">Crisis Performance — Gold vs Equity (2006–2026)</div>
+      <div class="cw"><canvas id="crisisChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px">₹20L invested over 20 years (SIP)</div>
+      <div class="cw"><canvas id="portfolioBar"></canvas></div>
+    </div>
+  </div>
+
+  <div class="callout accent">
+    <strong>The Diversification Proof:</strong> Gold and Nifty have a correlation of <strong>−0.08</strong> — near-zero. Gold rose in every single crisis (GFC +31.5%, COVID +5.3%, 2022 rate hike +5.7%, 2025 selloff +21.9%). It's not a growth asset — it's your portfolio's immune system.
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead><tr><th>Decade</th><th>Equity CAGR</th><th>Gold CAGR (INR)</th><th>Winner</th></tr></thead>
+      <tbody>
+        <tr><td>2006–2016</td><td>4.2%</td><td class="yellow">10.0%</td><td><span class="tag ty">Gold</span></td></tr>
+        <tr><td>2009–2019</td><td class="green">14.2%</td><td>7.6%</td><td><span class="tag tg">Equity</span></td></tr>
+        <tr><td>2012–2022</td><td class="green">12.8%</td><td>4.0%</td><td><span class="tag tg">Equity</span></td></tr>
+        <tr><td>2015–2025</td><td>10.3%</td><td class="yellow">11.9%</td><td><span class="tag ty">Gold</span></td></tr>
+        <tr><td>2016–2026</td><td>12.8%</td><td class="yellow">19.0%</td><td><span class="tag ty">Gold</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn"><strong>Hidden insight the video didn't mention:</strong> The rupee depreciated 116% in 20 years (₹44 → ₹95.7). Gold in INR earns ~4% extra CAGR annually just from currency depreciation — making it a passive currency hedge every Indian investor already holds for free.</div>
+
+  <div class="g3" style="margin-top:20px">
+    <div class="lesson"><div class="icon">🧭</div><div class="body"><strong>No one knows which asset wins next decade</strong><span>Gold led 5 of 11 rolling decades, equity 6. Diversify — it's the only honest answer.</span></div></div>
+    <div class="lesson"><div class="icon">🛡️</div><div class="body"><strong>Gold is crisis insurance, not a trade</strong><span>It protected capital in every major crash since 2006. Allocate 10–15% and stop watching the price.</span></div></div>
+    <div class="lesson"><div class="icon">📉</div><div class="body"><strong>Your strategy doesn't change with the news</strong><span>Media manufactures urgency. The data says: stay diversified, stay invested, stay boring.</span></div></div>
+  </div>
+</div>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════ CH 2 ══════ -->
+<div class="chapter" id="ch2">
+  <div class="ch-header">
+    <div class="ch-num" style="color:#34d399">02</div>
+    <div class="ch-meta">
+      <div class="ch-tag" style="background:rgba(52,211,153,.15);color:#34d399;">SALARY · BEHAVIOUR</div>
+      <div class="ch-title">CTC is Fiction — Your Savings Rate is Your Net Worth</div>
+      <div class="ch-sub">Three players. One earning ₹25L, one ₹40L, one ₹1Cr CTC. The highest earner doesn't win. Here's why behaviour beats salary every time.</div>
+    </div>
+  </div>
+
+  <div class="g3">
+    <div class="stat"><div class="n red">46%</div><div class="l">Nikil's 1Cr CTC → only 46% reaches bank</div></div>
+    <div class="stat"><div class="n yellow">Same</div><div class="l">Nikil (1Cr) = Player 2 (40L) in monthly in-hand</div></div>
+    <div class="stat"><div class="n green">46%</div><div class="l">Harish's savings rate on ₹95k income</div></div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px">CTC vs Actual In-Hand (Annual ₹L)</div>
+      <div class="cw"><canvas id="ctcChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px">Savings Rate — the number that actually matters</div>
+      <div class="cw"><canvas id="savingsBar"></canvas></div>
+    </div>
+  </div>
+
+  <div class="callout danger"><strong>The Lifestyle Inflation Trap:</strong> Player 2 earns <strong>2.6× more</strong> than Harish but saves almost the same absolute amount (₹40k vs ₹44k/month). A 3Cr house + Jeep + personal loan consumed the entire income advantage. 71% of salary goes to fixed EMIs — one layoff away from crisis.</div>
+
+  <div class="card" style="margin-bottom:18px">
+    <div style="font-weight:600;margin-bottom:14px">20-Year Wealth Projection (monthly SIP at each player's savings)</div>
+    <div class="cw-lg"><canvas id="wealthLine"></canvas></div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead><tr><th>Player</th><th>In-hand/mo</th><th>Fixed %</th><th>Savings/mo</th><th>Portfolio</th><th>Yr-20 corpus</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td style="color:#22c55e">Harish (25L CTC)</td><td>₹95k</td><td class="green">32%</td><td class="green">₹44k</td><td>Diversified MF+Debt+Gold</td><td class="green">₹4.46Cr</td><td><span class="tag tg">Best trajectory</span></td></tr>
+        <tr><td style="color:#60a5fa">Player 2 (40L CTC)</td><td>₹2.49L</td><td class="red">71%</td><td class="yellow">₹40k</td><td>70% MF, 29% FD, no gold</td><td class="yellow">₹3.27Cr</td><td><span class="tag ty">Tethered to job</span></td></tr>
+        <tr><td style="color:#f59e0b">Nikil (1Cr CTC)</td><td>₹2.54L</td><td class="yellow">~35%</td><td class="green">₹1L</td><td>52% crypto, 30% cash</td><td class="red">₹1.98–42Cr</td><td><span class="tag tr">High risk</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="g3" style="margin-top:20px">
+    <div class="lesson"><div class="icon">💡</div><div class="body"><strong>Negotiate in-hand, not CTC</strong><span>One-time payments, ESOPs, and insurance inflate CTC with no cash value. Always ask: "What is the fixed monthly in-hand?"</span></div></div>
+    <div class="lesson"><div class="icon">🧱</div><div class="body"><strong>Keep fixed costs below 50%</strong><span>EMIs above 50% of take-home eliminate financial optionality. Any surprise = crisis. Player 2's 71% is a cage.</span></div></div>
+    <div class="lesson"><div class="icon">📊</div><div class="body"><strong>Savings rate beats salary level</strong><span>Harish saves 46% on ₹95k. Player 2 saves 16% on ₹2.49L. Compounding doesn't care about your CTC.</span></div></div>
+  </div>
+</div>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════ CH 3 ══════ -->
+<div class="chapter" id="ch3">
+  <div class="ch-header">
+    <div class="ch-num" style="color:#f87171">03</div>
+    <div class="ch-meta">
+      <div class="ch-tag" style="background:rgba(248,113,113,.15);color:#f87171;">HOME BUYING · REAL ESTATE</div>
+      <div class="ch-title">The ₹1.5Cr Home Costs ₹2.3Cr — And Returns 3.1% CAGR</div>
+      <div class="ch-sub">Builders quote base price. Banks quote EMI. Nobody tells you the full math until you've already signed.</div>
+    </div>
+  </div>
+
+  <div class="g4">
+    <div class="stat"><div class="n red">+17.3%</div><div class="l">True cost above headline (₹26L extra)</div></div>
+    <div class="stat"><div class="n yellow">₹54.7L</div><div class="l">Interest paid to bank over 10 years</div></div>
+    <div class="stat"><div class="n red">3.1%</div><div class="l">Real CAGR after interest + tax (not "2×")</div></div>
+    <div class="stat"><div class="n green">30%</div><div class="l">Max EMI-to-income ratio to sleep well</div></div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px">True Cost of a 1.5Cr Home — All Hidden Charges</div>
+      <div class="cw"><canvas id="costPie"></canvas></div>
+    </div>
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px">House Equity vs Investing Same ₹ in Nifty / Gold (10yr)</div>
+      <div class="cw"><canvas id="oppChart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="callout danger"><strong>The "Doubled My Money" Myth:</strong> Buy 1.5Cr, sell 3Cr. Net received after CGT + transaction costs = ₹2.77Cr. Subtract ₹54.7L interest already paid. True profit = <strong>₹72L over 10 years = 3.1% CAGR.</strong> An FD beats this. Nifty triples it.</div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead><tr><th>The 3 Rules</th><th>Check</th><th>If you fail this…</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Breathability:</strong> All EMIs ≤ 30% of take-home</td><td><span class="tag tg">MUST PASS</span></td><td>One job loss → default. No breathing room for emergencies.</td></tr>
+        <tr><td><strong>Value filter:</strong> Home price ≤ 5× annual income</td><td><span class="tag ty">GUARDRAIL</span></td><td>You're buying lifestyle, not asset. Emotion → overpay.</td></tr>
+        <tr><td><strong>Sleep-well fund:</strong> Keep 6–12 months EMI in liquid</td><td><span class="tag tg">MUST PASS</span></td><td>No buffer means any surprise expense spirals into crisis.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="g3" style="margin-top:20px">
+    <div class="lesson"><div class="icon">🏷️</div><div class="body"><strong>Base price is fiction</strong><span>Add 17% for stamp duty, GST, registration, corpus, interior. Budget for ₹1.76Cr when the brochure says ₹1.5Cr.</span></div></div>
+    <div class="lesson"><div class="icon">🏦</div><div class="body"><strong>Interest is a hidden purchase price</strong><span>₹1.2Cr loan at 8% for 10yr = ₹54.7L to the bank. Your house cost ₹2.05Cr, not ₹1.5Cr. Account for it.</span></div></div>
+    <div class="lesson"><div class="icon">🏡</div><div class="body"><strong>Buy to live, not to invest</strong><span>As an investment, real estate returns 3–5% CAGR after interest+tax. Buy when the lifestyle math works, not FOMO.</span></div></div>
+  </div>
+</div>
+
+<hr>
+
+<!-- ══════════════════════════════════════════════ FINAL ══════ -->
+<div class="final">
+  <h2>The One Thread Connecting All Three Videos</h2>
+  <p class="story-line"><strong>The number on the brochure is always a lie.</strong> The gold price hides the rupee depreciation story. The CTC hides the in-hand reality. The home price hides the interest, the taxes, the GST, the corpus fund, the interiors.</p>
+  <p class="story-line"><strong>The media manufactures FOMO at every level.</strong> "Gold is up 13% — buy now." "Your friends have 1Cr CTC — you're behind." "Everyone's buying in Bangalore — don't miss out." The data never supports the panic.</p>
+  <p class="story-line"><strong>The formula that actually works</strong> across all three topics is identical: <em>know the full cost, not the headline number. Keep your fixed commitments low. Save a large fraction of what you earn. Diversify across assets. Don't make irreversible decisions under FOMO pressure.</em></p>
+  <p class="story-line" style="color:#a5b4fc;font-style:italic;">"You're doing fine. Stop clicking YouTube videos to find out if you're doing well enough. Figure out what you actually want — it costs less than you think." — 01 / Zero One</p>
+</div>
+
+</div><!-- /container -->
+
+<footer>
+  Data validated against: NSE Nifty (^NSEI), MCX Gold, USD/INR, Crude Oil (yfinance · 2006–2026). Stamp duty: Karnataka, Maharashtra, Delhi, TN, Telangana government schedules. EMI: reducing balance formula. LTCG: 12.5% post-Budget 2024. For education only — not financial advice.
+</footer>
+
+<script>
+const gc='rgba(255,255,255,0.06)',bf={family:'Segoe UI,system-ui',size:11};
+
+// CH1: Crisis chart
+new Chart(document.getElementById('crisisChart'),{
+  type:'bar',
+  data:{
+    labels:['GFC 2008','COVID 2020','Rate hike 2022','2025 Selloff','2026 YTD'],
+    datasets:[
+      {label:'Nifty %',data:[-46.2,-28.1,-9.0,2.3,-8.2],backgroundColor:'#3b82f688',borderColor:'#3b82f6',borderWidth:1},
+      {label:'Gold INR %',data:[31.5,5.3,5.7,21.9,12.8],backgroundColor:'#fbbf2488',borderColor:'#fbbf24',borderWidth:1},
+    ]
+  },
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},y:{ticks:{color:'#94a3b8',callback:v=>v+'%'},grid:{color:gc}}}}
+});
+
+// CH1: Portfolio bar
+new Chart(document.getElementById('portfolioBar'),{
+  type:'bar',
+  data:{
+    labels:['Equity only','Debt only','Gold only','Diversified'],
+    datasets:[{
+      label:'₹20L SIP → corpus (₹L)',
+      data:[64.5,43.4,125.2,77.7],
+      backgroundColor:['#3b82f688','#22c55e88','#fbbf2488','#818cf888'],
+      borderColor:['#3b82f6','#22c55e','#fbbf24','#818cf8'],
+      borderWidth:2
+    }]
+  },
+  options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',
+    plugins:{legend:{display:false}},
+    scales:{x:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}},y:{ticks:{color:'#94a3b8'},grid:{color:gc}}}}
+});
+
+// CH2: CTC bar
+new Chart(document.getElementById('ctcChart'),{
+  type:'bar',
+  data:{
+    labels:['Harish\n(25L CTC)','Player 2\n(40L CTC)','Nikil\n(1Cr CTC)'],
+    datasets:[
+      {label:'CTC (Annual ₹L)',data:[25,40,100],backgroundColor:'#64748b44',borderColor:'#64748b',borderWidth:1},
+      {label:'Actual in-hand (Annual ₹L)',data:[11.4,29.9,30.5],backgroundColor:['#22c55e88','#3b82f688','#f59e0b88'],borderColor:['#22c55e','#3b82f6','#f59e0b'],borderWidth:2},
+    ]
+  },
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},y:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}}}}
+});
+
+// CH2: Savings rate
+new Chart(document.getElementById('savingsBar'),{
+  type:'bar',
+  data:{
+    labels:['Harish','Player 2','Nikil'],
+    datasets:[
+      {label:'Fixed %',data:[32,71,35],backgroundColor:'#f8717188',borderColor:'#f87171',borderWidth:1},
+      {label:'Savings %',data:[46,16,39],backgroundColor:'#34d39988',borderColor:'#34d399',borderWidth:1},
+    ]
+  },
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},
+      y:{max:100,ticks:{color:'#94a3b8',callback:v=>v+'%'},grid:{color:gc}}}}
+});
+
+// CH2: Wealth line
+const yrs=Array.from({length:20},(_,i)=>i+1);
+new Chart(document.getElementById('wealthLine'),{
+  type:'line',
+  data:{
+    labels:yrs.map(y=>'Yr '+y),
+    datasets:[
+      {label:'Harish (₹44.6k/mo, 12%)',data:[5.71,12.15,19.4,27.58,36.79,47.17,58.86,72.04,86.89,103.62,122.48,143.72,167.67,194.64,225.04,259.29,297.89,341.39,390.4,445.62],borderColor:'#22c55e',backgroundColor:'#22c55e18',fill:true,tension:0.4,pointRadius:0},
+      {label:'Player 2 (₹40k/mo, 10.5%)',data:[5.08,10.72,16.99,23.94,31.66,40.23,49.75,60.31,72.04,85.06,99.52,115.57,133.39,153.17,175.13,199.51,226.58,256.63,290.0,327.04],borderColor:'#3b82f6',backgroundColor:'#3b82f618',fill:true,tension:0.4,pointRadius:0},
+      {label:'Nikil base (₹1L/mo, 10%)',data:[12.67,26.67,42.13,59.21,78.08,98.93,121.96,147.4,175.5,206.55,240.85,278.74,320.6,366.84,417.92,474.36,536.7,605.57,681.65,765.7],borderColor:'#f59e0b',fill:false,tension:0.4,pointRadius:0,borderDash:[6,3]},
+      {label:'Nikil crash (₹1L/mo, −2%)',data:[11.87,23.51,34.91,46.09,57.05,67.79,78.32,88.63,98.75,108.66,118.38,127.9,137.24,146.39,155.36,164.15,172.77,181.22,189.5,197.61],borderColor:'#f87171',fill:false,tension:0.4,pointRadius:0,borderDash:[2,4]},
+    ]
+  },
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8',maxTicksLimit:10},grid:{color:gc}},
+      y:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}}}}
+});
+
+// CH3: Cost pie
+new Chart(document.getElementById('costPie'),{
+  type:'doughnut',
+  data:{
+    labels:['Base price (₹150L)','Stamp duty (₹7.5L)','GST under-const (₹7.5L)','Registration (₹1.5L)','Interior+GST (₹7.1L)','Maintenance & deposits (₹1.7L)'],
+    datasets:[{data:[150,7.5,7.5,1.5,7.08,1.69],backgroundColor:['#1e3a5f','#dc2626','#ea580c','#ca8a04','#16a34a','#7c3aed'],borderWidth:0}]
+  },
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{position:'right',labels:{color:'#94a3b8',font:{size:10},boxWidth:12,padding:6}}}}
+});
+
+// CH3: Opportunity cost
+new Chart(document.getElementById('oppChart'),{
+  type:'line',
+  data:{
+    labels:Array.from({length:10},(_,i)=>'Yr '+(i+1)),
+    datasets:[
+      {label:'House equity (7% growth)',data:[48.7,68.7,90.3,113.6,138.6,165.5,194.4,225.5,259.0,295.1],borderColor:'#f87171',backgroundColor:'#f8717118',fill:true,tension:0.4,pointRadius:0},
+      {label:'Nifty (12% CAGR)',data:[51.1,74.7,101.1,130.7,163.9,201.0,242.6,289.2,341.3,399.8],borderColor:'#34d399',fill:false,tension:0.4,pointRadius:0},
+      {label:'Gold INR (13% CAGR)',data:[51.4,75.5,102.8,133.6,168.5,207.9,252.4,302.6,359.5,423.7],borderColor:'#fbbf24',fill:false,tension:0.4,pointRadius:0,borderDash:[5,3]},
+    ]
+  },
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},
+      y:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}}}}
+});
+</script>
+</body>
+</html>
