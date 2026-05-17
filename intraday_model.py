@@ -738,12 +738,12 @@ def train(symbols: list[str] | None = None, days: int = 58,
         print(f"FULL TRAIN — {len(symbols)} symbols · {days}d · two-stage")
         print("=" * 62)
 
-    OOT_DAYS = 3 if test_mode else 5   # per-symbol held-out trading days
+    TRAIN_FRAC = 0.70   # per-symbol temporal split: first 70% → train, last 30% → val/test
 
     all_X_tr:  list[pd.DataFrame] = []
     all_y_tr:  list[pd.Series]    = []
-    all_X_oot: list[pd.DataFrame] = []
-    all_y_oot: list[pd.Series]    = []
+    all_X_val: list[pd.DataFrame] = []   # per-symbol last-30% (honest test)
+    all_y_val: list[pd.Series]    = []
 
     for i, sym in enumerate(symbols, 1):
         print(f"  [{i:2}/{len(symbols)}] {sym}", end=" … ", flush=True)
@@ -759,35 +759,41 @@ def train(symbols: list[str] | None = None, days: int = 58,
         date_col     = df["DateTime"].dt.date
         bar_num      = df.groupby(date_col).cumcount()
         unique_dates = sorted(date_col.unique())
-        if len(unique_dates) <= OOT_DAYS:
+        if len(unique_dates) < 10:
             print("skipped (too few dates)"); continue
 
-        oot_cutoff   = unique_dates[-OOT_DAYS]   # first OOT date (last 5 trading days)
-        is_oot       = pd.Series(date_col >= oot_cutoff, index=df.index)
-        valid        = ((bar_num >= 6) & labels.notna()
-                        & (pd.RangeIndex(len(labels)) < len(labels) - TARGET_BARS)
-                        & feats.notna().all(axis=1))
+        # Per-symbol temporal 70/30 — no pooled contamination
+        cutoff = unique_dates[int(len(unique_dates) * TRAIN_FRAC)]
+        is_val = pd.Series(date_col >= cutoff, index=df.index)
+        is_tr  = ~is_val
+        valid  = ((bar_num >= 6) & labels.notna()
+                  & (pd.RangeIndex(len(labels)) < len(labels) - TARGET_BARS)
+                  & feats.notna().all(axis=1))
 
-        Xtr = feats[valid & ~is_oot][FEATURE_COLS].astype(float)
-        ytr = labels[valid & ~is_oot]
-        Xoo = feats[valid & is_oot][FEATURE_COLS].astype(float)
-        yoo = labels[valid & is_oot]
+        Xtr = feats[valid & is_tr][FEATURE_COLS].astype(float)
+        ytr = labels[valid & is_tr]
+        Xvl = feats[valid & is_val][FEATURE_COLS].astype(float)
+        yvl = labels[valid & is_val]
 
         if len(Xtr) < 50:
             print(f"skipped ({len(Xtr)} bars)"); continue
         all_X_tr.append(Xtr); all_y_tr.append(ytr)
-        if len(Xoo) >= 10:
-            all_X_oot.append(Xoo); all_y_oot.append(yoo)
-        print(f"train={len(Xtr):,}  oot={len(Xoo):,}  "
+        if len(Xvl) >= 10:
+            all_X_val.append(Xvl); all_y_val.append(yvl)
+        tr_days = int(len(unique_dates) * TRAIN_FRAC)
+        val_days = len(unique_dates) - tr_days
+        print(f"tr={len(Xtr):,}({tr_days}d)  val={len(Xvl):,}({val_days}d)  "
               f"(B:{(ytr==1).sum()} S:{(ytr==-1).sum()} H:{(ytr==0).sum()})")
 
     if not all_X_tr:
         print("No training data."); return
 
-    X_all = pd.concat(all_X_tr, ignore_index=True)
-    y_all = pd.concat(all_y_tr, ignore_index=True)
-    X_oot = pd.concat(all_X_oot, ignore_index=True) if all_X_oot else None
-    y_oot = pd.concat(all_y_oot, ignore_index=True) if all_y_oot else None
+    X_all = pd.concat(all_X_tr,  ignore_index=True)
+    y_all = pd.concat(all_y_tr,  ignore_index=True)
+    X_val = pd.concat(all_X_val, ignore_index=True) if all_X_val else None
+    y_val = pd.concat(all_y_val, ignore_index=True) if all_X_val else None
+    # No separate OOT — the 30% val IS the honest held-out test
+    X_oot = X_val;  y_oot = y_val
 
     n_buy  = (y_all == 1).sum();  n_sell = (y_all == -1).sum()
     n_hold = (y_all == 0).sum()
@@ -812,14 +818,17 @@ def train(symbols: list[str] | None = None, days: int = 58,
     print(f"  CV mean → dir={cv_dir*100:.1f}%  BUY={cv_buy*100:.1f}%  "
           f"SELL={cv_sell*100:.1f}%  combined={cv_comb*100:.1f}%")
 
-    # ── Per-symbol OOT (last 5 trading days per stock, completely unseen) ──
-    # OOT data collected per-symbol above; we defer evaluation to after
-    # final model is trained (so we use the full-data model on OOT).
+    # ── Final models: train on X_all, early-stop on per-symbol val ──────
+    # X_all = first ~48 days / symbol (pure training)
+    # X_val = days 48-53 / symbol   (temporal early-stopping signal)
+    # X_oot = last 5 days / symbol  (strictly unseen, reported separately)
+    X_tr = X_all;  y_tr = y_all
 
-    # ── Final models on 90/10 split ──────────────────────────────────
-    split       = int(len(X_all) * 0.90)
-    X_tr, X_val = X_all.iloc[:split], X_all.iloc[split:]
-    y_tr, y_val = y_all.iloc[:split], y_all.iloc[split:]
+    # Fallback: if val collection failed, slice last 10% of training pool
+    if X_val is None or len(X_val) < 100:
+        split  = int(len(X_all) * 0.90)
+        X_val  = X_all.iloc[split:];  y_val = y_all.iloc[split:]
+        X_tr   = X_all.iloc[:split];  y_tr  = y_all.iloc[:split]
 
     # ── Stage 1: Direction model (BUY/SELL only) ─────────────────────
     bs_mask     = y_tr.isin([1, -1])
@@ -967,7 +976,7 @@ def train(symbols: list[str] | None = None, days: int = 58,
 
     # Per-symbol OOT evaluation (most realistic — truly unseen recent bars)
     if X_oot is not None and len(X_oot) >= 50:
-        print(f"\n── Per-symbol OOT evaluation (last {OOT_DAYS} days/stock, "
+        print(f"\n── Per-symbol OOT evaluation (last 30% per stock, "
               f"n={len(X_oot):,} bars) ──")
         oot_r = _eval_two_stage(X_oot, y_oot, models_dir, model_hold,
                                 DIR_THRESHOLD, HOLD_THRESHOLD)
@@ -984,7 +993,7 @@ def train(symbols: list[str] | None = None, days: int = 58,
         hold_po  = model_hold.predict_proba(X_oot)[:, 1]
         dir_po   = _dir_proba_ensemble(models_dir, X_oot)
         N_oot    = oot_r['n_total']
-        oot_days_est = max(1, N_oot // (75 * max(1, len(all_X_oot))))
+        oot_days_est = max(1, N_oot // (75 * max(1, len(all_X_val))))
         for thr in [0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]:
             emit_o = (hold_po >= thr) & ((dir_po >= thr) | (dir_po <= 1 - thr))
             n_eo   = emit_o.sum()
