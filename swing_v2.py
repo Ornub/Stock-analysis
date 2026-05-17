@@ -695,44 +695,48 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     X = panel[FEATURE_COLS].values
     y = panel["label"].values
 
-    # XGBoost config — proven v2.1 base, unchanged for architectural continuity
+    # Class-balance weight: penalise majority class proportionally
+    spw = n_sell / max(n_buy, 1)
+
     XGB_BASE = dict(
         max_depth=4, learning_rate=0.03,
         min_child_weight=5, gamma=0.2,
         reg_alpha=0.5, reg_lambda=1.0,
         subsample=0.8, colsample_bytree=0.8, random_state=42,
+        scale_pos_weight=spw,
         eval_metric="logloss", verbosity=0,
     )
+    CV_TREES  = 300   # fixed depth for CV — avoids degenerate early-stop in small folds
+    FIN_TREES = 300   # stable final model
 
-    print("\nWalk-forward CV (PurgedTimeSeriesSplit, 5 folds, embargo=10d):")
+    print(f"\nClass balance weight (SELL/BUY): {spw:.3f}")
+    print(f"\nWalk-forward CV (PurgedTimeSeriesSplit, 5 folds, embargo=10d):")
     ptscv = PurgedTimeSeriesSplit(n_splits=5, embargo_size=EMBARGO_SIZE)
-    fold_accs, fold_precs, fold_recs, fold_iters = [], [], [], []
+    fold_accs, fold_precs, fold_recs, fold_srecs = [], [], [], []
 
     for i, (tr, te) in enumerate(ptscv.split(X), 1):
-        val_size  = max(int(len(tr) * 0.15), 100)
-        tr_inner  = tr[:-val_size]
-        val_inner = tr[-val_size:]
-        m = XGBClassifier(n_estimators=800, early_stopping_rounds=30, **XGB_BASE)
-        m.fit(X[tr_inner], y[tr_inner],
-              eval_set=[(X[val_inner], y[val_inner])], verbose=False)
-        y_pred = m.predict(X[te])
-        acc    = accuracy_score(y[te], y_pred)
-        prec   = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
-        rec    = recall_score(y[te], y_pred, pos_label=1, zero_division=0)
-        n_trees= getattr(m, "best_iteration", None) or m.n_estimators
+        m = XGBClassifier(n_estimators=CV_TREES, **XGB_BASE)
+        m.fit(X[tr], y[tr], verbose=False)
+        y_pred  = m.predict(X[te])
+        acc     = accuracy_score(y[te], y_pred)
+        prec    = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
+        rec     = recall_score(y[te], y_pred, pos_label=1, zero_division=0)
+        sell_rc = recall_score(y[te], y_pred, pos_label=0, zero_division=0)
         fold_accs.append(acc); fold_precs.append(prec)
-        fold_recs.append(rec); fold_iters.append(n_trees)
-        print(f"  Fold {i}: train={len(tr_inner):>5,}  val={val_inner.size:>4,}  "
-              f"test={len(te):>5,} | acc={acc:.3f}  BUY-prec={prec:.3f}  "
-              f"BUY-rec={rec:.3f}  trees={n_trees}")
+        fold_recs.append(rec); fold_srecs.append(sell_rc)
+        print(f"  Fold {i}: train={len(tr):>5,}  test={len(te):>5,} | "
+              f"acc={acc:.3f}  BUY-prec={prec:.3f}  "
+              f"BUY-rec={rec:.3f}  SELL-rec={sell_rc:.3f}")
 
     mean_acc  = float(np.mean(fold_accs))
     std_acc   = float(np.std(fold_accs))
     mean_prec = float(np.mean(fold_precs))
     mean_rec  = float(np.mean(fold_recs))
+    mean_srec = float(np.mean(fold_srecs))
     print(f"\nMean walk-forward accuracy : {mean_acc:.3f}  (±{std_acc:.3f})")
     print(f"Mean BUY precision         : {mean_prec:.3f}")
     print(f"Mean BUY recall            : {mean_rec:.3f}")
+    print(f"Mean SELL recall           : {mean_srec:.3f}")
 
     sigma    = max(std_acc, 1e-6)
     unstable = [(i+1, a) for i, a in enumerate(fold_accs) if abs(a - mean_acc) > 1.5*sigma]
@@ -759,8 +763,7 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print(f"Final train : {(~oot_mask).sum():,} samples  "
           f"[{unique_dates[0]} → {unique_dates[-31]}]")
 
-    n_final = max(int(np.median(fold_iters)) if fold_iters else 100, 50)
-    final   = XGBClassifier(n_estimators=n_final, **XGB_BASE)
+    final = XGBClassifier(n_estimators=FIN_TREES, **XGB_BASE)
     final.fit(X_train_final, y_train_final, verbose=False)
 
     # Honest OOT evaluation
@@ -769,12 +772,14 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
         y_oot_pred = final.predict(X_oot)
         y_oot_prob = final.predict_proba(X_oot)[:, 1]
         oot_acc  = accuracy_score(y_oot, y_oot_pred)
-        oot_prec = precision_score(y_oot, y_oot_pred, pos_label=1, zero_division=0)
-        oot_rec  = recall_score(y_oot, y_oot_pred, pos_label=1, zero_division=0)
+        oot_prec  = precision_score(y_oot, y_oot_pred, pos_label=1, zero_division=0)
+        oot_rec   = recall_score(y_oot, y_oot_pred, pos_label=1, zero_division=0)
+        oot_srec  = recall_score(y_oot, y_oot_pred, pos_label=0, zero_division=0)
         print(f"\nOOT test (last 30 trading days, n={len(X_oot):,}):")
         print(f"  Accuracy      : {oot_acc:.3f}")
         print(f"  BUY precision : {oot_prec:.3f}")
         print(f"  BUY recall    : {oot_rec:.3f}")
+        print(f"  SELL recall   : {oot_srec:.3f}")
         print("\nOOT probability calibration:")
         for p in (0.50, 0.55, 0.60, 0.62, 0.65, 0.70):
             pmask = y_oot_prob >= p
@@ -790,6 +795,7 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
         "val_std":    std_acc,
         "val_prec":   mean_prec,
         "val_rec":    mean_rec,
+        "val_srec":   mean_srec,
         "oot_acc":    oot_acc,
         "oot_prec":   oot_prec,
         "oot_rec":    oot_rec,
@@ -803,9 +809,11 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print(f"Total panel rows  : {total_rows:,}")
     print(f"Labelled samples  : {len(panel):,}")
     print(f"Class balance     : BUY {n_buy/len(panel)*100:.1f}%  SELL {n_sell/len(panel)*100:.1f}%")
+    print(f"scale_pos_weight  : {spw:.3f}")
     print(f"Features          : {len(FEATURE_COLS)}")
-    print(f"Final trees       : {n_final}")
+    print(f"Final trees       : {FIN_TREES}")
     print(f"CV accuracy       : {mean_acc:.3f}  (±{std_acc:.3f})")
+    print(f"CV SELL recall    : {mean_srec:.3f}")
     print(f"OOT accuracy      : {oot_acc:.3f}")
 
     imp = pd.Series(final.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
