@@ -607,14 +607,23 @@ def make_labels(df: pd.DataFrame) -> pd.Series:
     return pd.Series(lbl, index=df.index)
 
 
+def _dir_proba_ensemble(models_dir, X: pd.DataFrame) -> np.ndarray:
+    """Average P(BUY) across an ensemble of direction models."""
+    if not isinstance(models_dir, (list, tuple)):
+        return models_dir.predict_proba(X)[:, 1]
+    return np.mean([m.predict_proba(X)[:, 1] for m in models_dir], axis=0)
+
+
 def _eval_two_stage(X: pd.DataFrame, y_raw: pd.Series,
-                    model_dir, model_hold) -> dict:
-    """Evaluate the two-stage model on a held-out set. Returns accuracy metrics."""
+                    model_dir, model_hold,
+                    dir_thr: float = 0.5,
+                    hold_thr: float = 0.5) -> dict:
+    """Evaluate two-stage model. model_dir can be a list for ensemble averaging."""
     # Stage 1 — direction (BUY vs SELL bars only)
     bs_mask   = y_raw.isin([1, -1])
     X_bs      = X[bs_mask]
-    y_bs      = (y_raw[bs_mask] == 1).astype(int)   # 1=BUY, 0=SELL
-    dir_proba = model_dir.predict_proba(X_bs)[:, 1]  # P(BUY)
+    y_bs      = (y_raw[bs_mask] == 1).astype(int)
+    dir_proba = _dir_proba_ensemble(model_dir, X_bs)
     dir_pred  = (dir_proba >= 0.5).astype(int)
     dir_acc   = float(np.mean(dir_pred == y_bs.values))
 
@@ -624,17 +633,18 @@ def _eval_two_stage(X: pd.DataFrame, y_raw: pd.Series,
     sell_acc  = float(np.mean(dir_pred[sell_mask.values] == 0)) if sell_mask.any() else 0.0
 
     # Stage 2 — HOLD filter (all bars)
-    y_nhold     = (y_raw != 0).astype(int)   # 1=BUY or SELL, 0=HOLD
-    hold_proba  = model_hold.predict_proba(X)[:, 1]   # P(non-HOLD)
+    y_nhold     = (y_raw != 0).astype(int)
+    hold_proba  = model_hold.predict_proba(X)[:, 1]
     hold_pred   = (hold_proba >= 0.5).astype(int)
     hold_acc    = float(np.mean(hold_pred == y_nhold.values))
 
-    # Combined signal accuracy (on bars where model actually emits BUY/SELL)
-    emit_mask   = (hold_proba >= HOLD_THRESHOLD)
+    # Combined signal accuracy at current operating thresholds
+    emit_mask   = (hold_proba >= hold_thr)
     n_emit      = emit_mask.sum()
     combined_acc = 0.0
     if n_emit > 0:
-        dir_emit  = (model_dir.predict_proba(X[emit_mask])[:, 1] >= DIR_THRESHOLD).astype(int)
+        dp        = _dir_proba_ensemble(model_dir, X[emit_mask])
+        dir_emit  = (dp >= dir_thr).astype(int)
         true_dir  = (y_raw[emit_mask].values == 1).astype(int)
         combined_acc = float(np.mean(dir_emit == true_dir))
 
@@ -728,8 +738,12 @@ def train(symbols: list[str] | None = None, days: int = 58,
         print(f"FULL TRAIN — {len(symbols)} symbols · {days}d · two-stage")
         print("=" * 62)
 
-    all_X: list[pd.DataFrame] = []
-    all_y: list[pd.Series]    = []
+    OOT_DAYS = 3 if test_mode else 5   # per-symbol held-out trading days
+
+    all_X_tr:  list[pd.DataFrame] = []
+    all_y_tr:  list[pd.Series]    = []
+    all_X_oot: list[pd.DataFrame] = []
+    all_y_oot: list[pd.Series]    = []
 
     for i, sym in enumerate(symbols, 1):
         print(f"  [{i:2}/{len(symbols)}] {sym}", end=" … ", flush=True)
@@ -742,30 +756,51 @@ def train(symbols: list[str] | None = None, days: int = 58,
         except Exception as e:
             print(f"skipped ({e})"); continue
 
-        date_col   = df["DateTime"].dt.date
-        bar_num    = df.groupby(date_col).cumcount()
-        mask = (bar_num >= 6) & labels.notna() & (labels.index < len(labels) - TARGET_BARS) \
-               & feats.notna().all(axis=1)
+        date_col     = df["DateTime"].dt.date
+        bar_num      = df.groupby(date_col).cumcount()
+        unique_dates = sorted(date_col.unique())
+        if len(unique_dates) <= OOT_DAYS:
+            print("skipped (too few dates)"); continue
 
-        X = feats[mask][FEATURE_COLS].astype(float)
-        y = labels[mask]
-        if len(X) < 50:
-            print(f"skipped ({len(X)} bars)"); continue
-        all_X.append(X); all_y.append(y)
-        print(f"{len(X):,} bars  (B:{(y==1).sum()} S:{(y==-1).sum()} H:{(y==0).sum()})")
+        oot_cutoff   = unique_dates[-OOT_DAYS]   # first OOT date (last 5 trading days)
+        is_oot       = pd.Series(date_col >= oot_cutoff, index=df.index)
+        valid        = ((bar_num >= 6) & labels.notna()
+                        & (pd.RangeIndex(len(labels)) < len(labels) - TARGET_BARS)
+                        & feats.notna().all(axis=1))
 
-    if not all_X:
+        Xtr = feats[valid & ~is_oot][FEATURE_COLS].astype(float)
+        ytr = labels[valid & ~is_oot]
+        Xoo = feats[valid & is_oot][FEATURE_COLS].astype(float)
+        yoo = labels[valid & is_oot]
+
+        if len(Xtr) < 50:
+            print(f"skipped ({len(Xtr)} bars)"); continue
+        all_X_tr.append(Xtr); all_y_tr.append(ytr)
+        if len(Xoo) >= 10:
+            all_X_oot.append(Xoo); all_y_oot.append(yoo)
+        print(f"train={len(Xtr):,}  oot={len(Xoo):,}  "
+              f"(B:{(ytr==1).sum()} S:{(ytr==-1).sum()} H:{(ytr==0).sum()})")
+
+    if not all_X_tr:
         print("No training data."); return
 
-    X_all = pd.concat(all_X, ignore_index=True)
-    y_all = pd.concat(all_y, ignore_index=True)
+    X_all = pd.concat(all_X_tr, ignore_index=True)
+    y_all = pd.concat(all_y_tr, ignore_index=True)
+    X_oot = pd.concat(all_X_oot, ignore_index=True) if all_X_oot else None
+    y_oot = pd.concat(all_y_oot, ignore_index=True) if all_y_oot else None
 
     n_buy  = (y_all == 1).sum();  n_sell = (y_all == -1).sum()
     n_hold = (y_all == 0).sum()
-    print(f"\nTotal: {len(X_all):,} bars  "
+    print(f"\nTrain: {len(X_all):,} bars  "
           f"BUY={n_buy:,} ({n_buy/len(y_all)*100:.0f}%)  "
           f"SELL={n_sell:,} ({n_sell/len(y_all)*100:.0f}%)  "
           f"HOLD={n_hold:,} ({n_hold/len(y_all)*100:.0f}%)")
+    if X_oot is not None:
+        nb_o = (y_oot==1).sum(); ns_o = (y_oot==-1).sum(); nh_o = (y_oot==0).sum()
+        print(f"OOT  : {len(X_oot):,} bars  "
+              f"BUY={nb_o:,} ({nb_o/len(y_oot)*100:.0f}%)  "
+              f"SELL={ns_o:,} ({ns_o/len(y_oot)*100:.0f}%)  "
+              f"HOLD={nh_o:,} ({nh_o/len(y_oot)*100:.0f}%)")
 
     # ── Walk-forward CV ──────────────────────────────────────────────
     print("\n── Walk-forward CV (3-fold, temporal) ──")
@@ -777,51 +812,9 @@ def train(symbols: list[str] | None = None, days: int = 58,
     print(f"  CV mean → dir={cv_dir*100:.1f}%  BUY={cv_buy*100:.1f}%  "
           f"SELL={cv_sell*100:.1f}%  combined={cv_comb*100:.1f}%")
 
-    # ── Explicit OOT test (train on first 80%, test on last 20%) ─────
-    # This simulates deploying today: model never saw last 20% of data.
-    print("\n── Out-of-Time (OOT) validation — last 20% strictly held out ──")
-    oot_split   = int(len(X_all) * 0.80)
-    X_oot_tr    = X_all.iloc[:oot_split];  y_oot_tr = y_all.iloc[:oot_split]
-    X_oot_te    = X_all.iloc[oot_split:];  y_oot_te = y_all.iloc[oot_split:]
-
-    bs_oot      = y_oot_tr.isin([1, -1])
-    X_bs_oot    = X_oot_tr[bs_oot]
-    y_bs_oot    = (y_oot_tr[bs_oot] == 1).astype(int)
-    n_bo = (y_bs_oot==1).sum(); n_so = (y_bs_oot==0).sum()
-    w_oot = y_bs_oot.apply(lambda v: (n_bo+n_so)/(2*n_bo) if v==1
-                            else (n_bo+n_so)/(2*n_so)).values
-    m_oot_dir = XGBClassifier(
-        n_estimators=400, max_depth=5, learning_rate=0.03,
-        subsample=0.75, colsample_bytree=0.65, min_child_weight=15,
-        gamma=1.5, reg_alpha=0.15, reg_lambda=1.5,
-        objective="binary:logistic", tree_method="hist",
-        random_state=42, n_jobs=-1, verbosity=0,
-    )
-    m_oot_dir.fit(X_bs_oot, y_bs_oot, sample_weight=w_oot)
-
-    y_nh_oot    = (y_oot_tr != 0).astype(int)
-    n_nho = (y_nh_oot==1).sum(); n_ho = (y_nh_oot==0).sum()
-    w_nh_oot = y_nh_oot.apply(lambda v: (n_nho+n_ho)/(2*n_nho) if v==1
-                               else (n_nho+n_ho)/(2*n_ho)*0.8).values
-    m_oot_hold = XGBClassifier(
-        n_estimators=250, max_depth=4, learning_rate=0.04,
-        subsample=0.75, colsample_bytree=0.70, min_child_weight=20,
-        gamma=2.5, reg_alpha=0.20, reg_lambda=2.5,
-        objective="binary:logistic", tree_method="hist",
-        random_state=42, n_jobs=-1, verbosity=0,
-    )
-    m_oot_hold.fit(X_oot_tr, y_nh_oot, sample_weight=w_nh_oot)
-
-    oot_r = _eval_two_stage(X_oot_te, y_oot_te, m_oot_dir, m_oot_hold)
-    print(f"  OOT dir accuracy : {oot_r['dir_acc']*100:.1f}%  (CV mean: {cv_dir*100:.1f}%)")
-    print(f"  OOT BUY  recall  : {oot_r['buy_acc']*100:.1f}%  ← target ≥60%")
-    print(f"  OOT SELL recall  : {oot_r['sell_acc']*100:.1f}%")
-    print(f"  OOT combined     : {oot_r['combined_acc']*100:.1f}%  (on emitted signals)")
-    print(f"  OOT emit rate    : {oot_r['n_emit']}/{oot_r['n_total']} "
-          f"({oot_r['n_emit']/oot_r['n_total']*100:.1f}%)")
-    gap = abs(oot_r['dir_acc'] - cv_dir)
-    print(f"  OOT vs CV gap    : {gap*100:.1f}pp  "
-          f"{'✓ No overfit' if gap < 0.05 else '⚠ Gap > 5pp — check for overfit'}")
+    # ── Per-symbol OOT (last 5 trading days per stock, completely unseen) ──
+    # OOT data collected per-symbol above; we defer evaluation to after
+    # final model is trained (so we use the full-data model on OOT).
 
     # ── Final models on 90/10 split ──────────────────────────────────
     split       = int(len(X_all) * 0.90)
@@ -838,45 +831,64 @@ def train(symbols: list[str] | None = None, days: int = 58,
     w_dir = y_bs.apply(lambda v: (n_b + n_s) / (2 * n_b) if v == 1
                        else (n_b + n_s) / (2 * n_s)).values
 
-    print(f"\n── Stage 1: Direction model  "
-          f"(train on {len(X_bs):,} BUY/SELL bars) ──")
-    model_dir = XGBClassifier(
-        n_estimators=1500,
-        max_depth=5,
-        learning_rate=0.020,
-        subsample=0.75,
-        colsample_bytree=0.65,
-        colsample_bylevel=0.80,
-        min_child_weight=12,
-        gamma=1.2,
-        reg_alpha=0.12,
-        reg_lambda=1.2,
-        eval_metric="logloss",
-        objective="binary:logistic",
-        tree_method="hist",
-        random_state=42,
-        n_jobs=-1,
-        verbosity=0,
-        early_stopping_rounds=60,
-    )
     bs_val  = y_val.isin([1, -1])
     X_bs_v  = X_val[bs_val]
     y_bs_v  = (y_val[bs_val] == 1).astype(int)
-    model_dir.fit(X_bs, y_bs, sample_weight=w_dir,
-                  eval_set=[(X_bs_v, y_bs_v)], verbose=200)
 
-    dir_preds = model_dir.predict(X_bs_v)
-    dir_acc   = float(np.mean(dir_preds == y_bs_v.values))
-    buy_acc   = float(np.mean(dir_preds[y_bs_v == 1] == 1)) if (y_bs_v == 1).any() else 0.0
-    sell_acc  = float(np.mean(dir_preds[y_bs_v == 0] == 0)) if (y_bs_v == 0).any() else 0.0
-    print(f"\nStage 1 val → dir={dir_acc*100:.1f}%  "
+    # ── Stage 1 ensemble: 3 direction models (diverse seeds + col subsets) ──
+    print(f"\n── Stage 1: Direction ensemble  "
+          f"(train on {len(X_bs):,} BUY/SELL bars × 3 models) ──")
+    _ens_cfgs = [
+        dict(random_state=42, colsample_bytree=0.65, colsample_bylevel=0.80,
+             colsample_bynode=0.75, subsample=0.75),
+        dict(random_state=43, colsample_bytree=0.70, colsample_bylevel=0.85,
+             colsample_bynode=0.70, subsample=0.80),
+        dict(random_state=44, colsample_bytree=0.60, colsample_bylevel=0.75,
+             colsample_bynode=0.80, subsample=0.70),
+    ]
+    models_dir = []
+    for ci, cfg in enumerate(_ens_cfgs, 1):
+        print(f"  Training model {ci}/3 …", end="", flush=True)
+        m = XGBClassifier(
+            n_estimators=2000,
+            max_depth=5,
+            learning_rate=0.015,
+            min_child_weight=12,
+            gamma=1.2,
+            reg_alpha=0.12,
+            reg_lambda=1.2,
+            eval_metric="logloss",
+            objective="binary:logistic",
+            tree_method="hist",
+            n_jobs=-1,
+            verbosity=0,
+            early_stopping_rounds=80,
+            **cfg,
+        )
+        m.fit(X_bs, y_bs, sample_weight=w_dir,
+              eval_set=[(X_bs_v, y_bs_v)], verbose=False)
+        models_dir.append(m)
+        ens_dir_p = _dir_proba_ensemble(models_dir, X_bs_v)
+        ens_acc   = float(np.mean((ens_dir_p >= 0.5).astype(int) == y_bs_v.values))
+        print(f"  iter={m.best_iteration:4d}  "
+              f"ensemble val dir={ens_acc*100:.1f}%")
+
+    # Final ensemble accuracy report
+    ens_dir_p = _dir_proba_ensemble(models_dir, X_bs_v)
+    ens_pred  = (ens_dir_p >= 0.5).astype(int)
+    dir_acc   = float(np.mean(ens_pred == y_bs_v.values))
+    buy_acc   = float(np.mean(ens_pred[y_bs_v == 1] == 1)) if (y_bs_v == 1).any() else 0.0
+    sell_acc  = float(np.mean(ens_pred[y_bs_v == 0] == 0)) if (y_bs_v == 0).any() else 0.0
+    print(f"\nEnsemble val → dir={dir_acc*100:.1f}%  "
           f"BUY-recall={buy_acc*100:.1f}%  SELL-recall={sell_acc*100:.1f}%  "
           f"(random=50%)")
-    print(f"Best iteration: {model_dir.best_iteration}")
-
-    print("\n── Stage 1 per-class report ──")
-    print(classification_report(y_bs_v, dir_preds,
+    print("\n── Stage 1 per-class report (ensemble) ──")
+    print(classification_report(y_bs_v, ens_pred,
                                  target_names=["SELL","BUY"], digits=3))
+
+    # For backward compat: expose single "model_dir" as the best individual model
+    best_individual = max(models_dir, key=lambda m: m.best_score)
+    model_dir = best_individual
 
     # ── Stage 2: HOLD filter (all bars) ──────────────────────────────
     print("── Stage 2: HOLD filter  (train on all bars) ──")
@@ -913,33 +925,79 @@ def train(symbols: list[str] | None = None, days: int = 58,
     print(f"\nStage 2 val → HOLD-filter acc={hold_acc*100:.1f}%")
     print(f"Best iteration: {model_hold.best_iteration}")
 
-    # ── Combined evaluation ───────────────────────────────────────────
-    print("\n── Combined two-stage evaluation ──")
-    combined = _eval_two_stage(X_val, y_val, model_dir, model_hold)
+    # ── Combined evaluation (ensemble) ───────────────────────────────
+    print("\n── Combined two-stage evaluation (ensemble) ──")
+    combined = _eval_two_stage(X_val, y_val, models_dir, model_hold,
+                               DIR_THRESHOLD, HOLD_THRESHOLD)
     emit_pct  = combined['n_emit'] / combined['n_total'] * 100
     print(f"  Emit rate  : {combined['n_emit']:,}/{combined['n_total']:,} bars "
-          f"({emit_pct:.1f}%) — bars where model signals BUY or SELL")
+          f"({emit_pct:.1f}%)")
     print(f"  BUY  recall: {combined['buy_acc']*100:.1f}%  ← target ≥60%")
     print(f"  SELL recall: {combined['sell_acc']*100:.1f}%")
     print(f"  Directional: {combined['dir_acc']*100:.1f}%  (50%=random)")
     print(f"  Combined   : {combined['combined_acc']*100:.1f}%  "
           f"(on emitted signals only)")
 
-    # Threshold sensitivity — show how combined accuracy and emit rate trade off
-    print("\n── Threshold sensitivity (precision vs coverage) ──")
-    hold_proba_all = model_hold.predict_proba(X_val)[:, 1]
-    dir_proba_all  = model_dir.predict_proba(X_val)[:, 1]
-    for thr in [0.50, 0.55, 0.60, 0.65, 0.70]:
-        emit   = (hold_proba_all >= thr) & ((dir_proba_all >= thr) | (dir_proba_all <= 1-thr))
-        n_e    = emit.sum()
+    # Fine threshold sweep — val set (ensemble probs)
+    print("\n── Threshold sweep — val set (ensemble) ──")
+    print(f"  {'thr':>5}  {'emit':>8}  {'cover%':>7}  {'accuracy':>9}  "
+          f"{'BUY%':>6}  {'signals/day*':>13}")
+    hold_pa = model_hold.predict_proba(X_val)[:, 1]
+    dir_pa  = _dir_proba_ensemble(models_dir, X_val)
+    N_val   = combined['n_total']
+    # approximate trading days in val set  (75 bars/day, 45 symbols)
+    est_days = max(1, N_val // (75 * max(1, len(all_X_tr))))
+    for thr in [0.50, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]:
+        emit = (hold_pa >= thr) & ((dir_pa >= thr) | (dir_pa <= 1 - thr))
+        n_e  = emit.sum()
         if n_e == 0:
-            print(f"  thr={thr:.2f}: no signals"); continue
-        dir_em = (dir_proba_all[emit] >= thr).astype(int)
-        true_d = (y_val.values[emit] == 1).astype(int)
-        acc_e  = float(np.mean(dir_em == true_d))
-        print(f"  thr={thr:.2f}: emit={n_e:4d}/{combined['n_total']:,} "
-              f"({n_e/combined['n_total']*100:4.1f}%)  "
-              f"accuracy={acc_e*100:.1f}%")
+            print(f"  {thr:.2f}:   no signals"); continue
+        de   = (dir_pa[emit] >= thr).astype(int)
+        td   = (y_val.values[emit] == 1).astype(int)
+        acc  = float(np.mean(de == td))
+        buy_e  = emit & (dir_pa >= thr)
+        b_acc  = (float(np.mean((dir_pa[buy_e] >= thr).astype(int) ==
+                                (y_val.values[buy_e] == 1).astype(int)))
+                  if buy_e.sum() > 0 else 0.0)
+        sigs_day = n_e / max(1, est_days)
+        mark = " ← 80% zone" if 0.78 <= acc <= 0.82 else (" ← 75%+" if 0.75 <= acc < 0.78 else "")
+        print(f"  {thr:.2f}:  {n_e:5d}/{N_val:,} ({n_e/N_val*100:4.1f}%)  "
+              f"acc={acc*100:.1f}%  BUY={b_acc*100:.1f}%  "
+              f"~{sigs_day:.0f}/day{mark}")
+
+    # Per-symbol OOT evaluation (most realistic — truly unseen recent bars)
+    if X_oot is not None and len(X_oot) >= 50:
+        print(f"\n── Per-symbol OOT evaluation (last {OOT_DAYS} days/stock, "
+              f"n={len(X_oot):,} bars) ──")
+        oot_r = _eval_two_stage(X_oot, y_oot, models_dir, model_hold,
+                                DIR_THRESHOLD, HOLD_THRESHOLD)
+        print(f"  OOT dir accuracy : {oot_r['dir_acc']*100:.1f}%")
+        print(f"  OOT BUY  recall  : {oot_r['buy_acc']*100:.1f}%")
+        print(f"  OOT SELL recall  : {oot_r['sell_acc']*100:.1f}%")
+        print(f"  OOT combined     : {oot_r['combined_acc']*100:.1f}%")
+        print(f"  OOT emit rate    : "
+              f"{oot_r['n_emit']}/{oot_r['n_total']} "
+              f"({oot_r['n_emit']/oot_r['n_total']*100:.1f}%)")
+        # OOT threshold sweep
+        print(f"\n  OOT threshold sweep ──")
+        print(f"  {'thr':>5}  {'emit':>8}  {'cover%':>7}  {'accuracy':>9}  signals/day")
+        hold_po  = model_hold.predict_proba(X_oot)[:, 1]
+        dir_po   = _dir_proba_ensemble(models_dir, X_oot)
+        N_oot    = oot_r['n_total']
+        oot_days_est = max(1, N_oot // (75 * max(1, len(all_X_oot))))
+        for thr in [0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]:
+            emit_o = (hold_po >= thr) & ((dir_po >= thr) | (dir_po <= 1 - thr))
+            n_eo   = emit_o.sum()
+            if n_eo == 0:
+                print(f"  {thr:.2f}:   no signals"); continue
+            de_o  = (dir_po[emit_o] >= thr).astype(int)
+            td_o  = (y_oot.values[emit_o] == 1).astype(int)
+            acc_o = float(np.mean(de_o == td_o))
+            spd   = n_eo / max(1, oot_days_est)
+            mark  = " ← 80% zone" if 0.78 <= acc_o <= 0.82 else (
+                    " ← 75%+"    if 0.75 <= acc_o < 0.78  else "")
+            print(f"  {thr:.2f}:  {n_eo:5d}/{N_oot:,} ({n_eo/N_oot*100:4.1f}%)  "
+                  f"acc={acc_o*100:.1f}%  ~{spd:.0f}/day{mark}")
 
     # Feature importance from direction model (the more discriminating one)
     imp = pd.Series(model_dir.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
@@ -954,8 +1012,9 @@ def train(symbols: list[str] | None = None, days: int = 58,
 
     MODEL_PATH.parent.mkdir(exist_ok=True)
     joblib.dump({
-        "model":          model_dir,   # kept as "model" for dashboard compat
-        "model_dir":      model_dir,
+        "model":          model_dir,        # best individual model (dashboard compat)
+        "model_dir":      model_dir,        # same — single model fallback
+        "models_dir":     models_dir,       # full 3-model ensemble
         "model_hold":     model_hold,
         "features":       FEATURE_COLS,
         "val_acc":        dir_acc,
@@ -965,12 +1024,12 @@ def train(symbols: list[str] | None = None, days: int = 58,
         "cv_dir_acc":     cv_dir,
         "cv_buy_acc":     cv_buy,
         "trained_at":     str(date.today()),
-        "n_symbols":      len(all_X),
+        "n_symbols":      len(all_X_tr),
         "n_samples":      len(X_all),
         "target_bars":    TARGET_BARS,
         "buy_thresh":     BUY_THRESH,
         "feature_imp":    imp.to_dict(),
-        "version":        "4",
+        "version":        "6",
     }, MODEL_PATH)
     print(f"\nSaved → {MODEL_PATH}")
 
@@ -984,10 +1043,14 @@ def predict(symbol: str) -> dict:
     if not MODEL_PATH.exists():
         return {**default, "error": "Model not trained. Run: python intraday_model.py train"}
 
-    blob       = joblib.load(MODEL_PATH)
-    model_dir  = blob.get("model_dir",  blob["model"])
-    model_hold = blob.get("model_hold", None)
-    feat_cols  = blob.get("features", FEATURE_COLS)
+    blob        = joblib.load(MODEL_PATH)
+    # Use full ensemble when available; fall back to single model
+    models_dir  = blob.get("models_dir", None)
+    model_dir   = blob.get("model_dir",  blob["model"])
+    if models_dir is None:
+        models_dir = model_dir
+    model_hold  = blob.get("model_hold", None)
+    feat_cols   = blob.get("features", FEATURE_COLS)
 
     df = fetch_5min(symbol, days=5)
     if df is None or df.empty:
@@ -1018,8 +1081,8 @@ def predict(symbol: str) -> dict:
     else:
         hold_proba = 1.0
 
-    # Stage 1: Direction — BUY or SELL?
-    dir_proba = float(model_dir.predict_proba(X)[0][1])  # P(BUY)
+    # Stage 1: Direction — ensemble average P(BUY)
+    dir_proba = float(_dir_proba_ensemble(models_dir, X)[0])
 
     if dir_proba >= DIR_THRESHOLD:
         signal = "BUY";  conf = dir_proba
