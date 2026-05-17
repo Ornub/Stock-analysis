@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 import joblib
-from xgboost import XGBClassifier
+import lightgbm as lgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
@@ -222,7 +222,7 @@ SECTOR_MAP: dict[str, str] = {
 # Training
 LOOKBACK_YEARS = 5
 FORWARD_DAYS   = 5
-THRESHOLD      = 0.02   # ±2% label band
+THRESHOLD      = 0.03   # ±3% label band — tighter than v3.1 to reduce noise
 EMBARGO_SIZE   = 10     # trading days purged between train/test in purged CV
 
 # ── Market regime filter ────────────────────────────────────────────────────
@@ -285,6 +285,27 @@ ROUND_TRIP_COST = 0.0050   # 0.50% combined brokerage + STT + GST
 
 MODEL_DIR  = Path("models")
 MODEL_PATH = MODEL_DIR / "swing_v2.pkl"
+
+
+# =============================================================================
+# Ensemble wrapper — module-level so joblib can pickle it
+# =============================================================================
+
+class LGBMEnsemble:
+    """Average probability across diverse LightGBM models."""
+    def __init__(self, estimators: list):
+        self.estimators_ = estimators
+
+    def predict_proba(self, X) -> np.ndarray:
+        p = np.mean([m.predict_proba(X)[:, 1] for m in self.estimators_], axis=0)
+        return np.column_stack([1 - p, p])
+
+    def predict(self, X) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+    @property
+    def feature_importances_(self) -> np.ndarray:
+        return np.mean([m.feature_importances_ for m in self.estimators_], axis=0)
 
 
 # =============================================================================
@@ -357,11 +378,20 @@ FEATURE_COLS = [
     "feat_price_accel",         # ROC acceleration: 5d ROC change over 5 days
     "feat_candle_pattern",      # Engulfing / hammer / shooting-star score
     "feat_obv_slope",           # OBV EMA5/EMA20 cross: accumulation momentum
+    # ── Phase 2: market-regime context  [v4.0] ────────────────────────
+    "feat_market_return_1d",    # Nifty 1-day return — bull/bear day context
+    "feat_market_return_5d",    # Nifty 5-day return — trend strength
+    "feat_market_volatility_20d", # Nifty realised vol — fear proxy
+    "feat_vix_level",           # India VIX / 100
+    "feat_vix_change_5d",       # VIX momentum — rising = fear expanding
+    "feat_relative_return_5d",  # stock − Nifty 5d: relative strength
+    "feat_nifty_rsi",           # Nifty RSI(14) / 100 — overbought/oversold
+    "feat_nifty_trend",         # 50DMA/200DMA − 1: golden/death cross strength
+    "feat_nifty_above_200dma",  # +1 bull / −1 bear long-term regime
 ]
 
-# Auxiliary market-regime columns — joined for gate/display use only; NOT in
-# FEATURE_COLS because regime-correlated entries create a regime-bias in CV
-# that collapses win rate when the market transitions out of the trained regime.
+# Auxiliary market-regime columns — joined from the Nifty fetch.
+# All are now included in FEATURE_COLS above.
 MARKET_AUX_COLS = [
     "feat_market_return_1d",
     "feat_market_return_5d",
@@ -369,6 +399,9 @@ MARKET_AUX_COLS = [
     "feat_vix_level",
     "feat_vix_change_5d",
     "feat_relative_return_5d",
+    "feat_nifty_rsi",
+    "feat_nifty_trend",
+    "feat_nifty_above_200dma",
 ]
 
 
@@ -497,6 +530,11 @@ def _fetch_market_regime(years: int) -> pd.DataFrame:
         df["feat_vix_level"]     = 0.15
         df["feat_vix_change_5d"] = 0.0
 
+    nc = nifty["Close"].reindex(df.index)
+    df["feat_nifty_rsi"]          = _rsi(nc, 14).fillna(50) / 100
+    df["feat_nifty_trend"]        = (df["nifty_50dma"] / df["nifty_200dma"].replace(0, np.nan) - 1).fillna(0)
+    df["feat_nifty_above_200dma"] = ((nc > df["nifty_200dma"]).astype(float) * 2 - 1).fillna(0)
+
     df = df.reset_index().rename(columns={"Date": "DateTime"})
     df["DateTime"] = pd.to_datetime(df["DateTime"]).dt.tz_localize(None).dt.normalize()
     _MARKET_CACHE = df
@@ -555,7 +593,9 @@ def _attach_market_features(panel: pd.DataFrame, market: pd.DataFrame) -> pd.Dat
 
     panel = panel.copy()
     panel["_date_key"] = pd.to_datetime(panel["DateTime"]).dt.tz_localize(None).dt.normalize()
-    join_cols = ["DateTime"] + [c for c in MARKET_AUX_COLS if c != "feat_relative_return_5d"]
+    direct_cols = [c for c in MARKET_AUX_COLS if c != "feat_relative_return_5d"
+                   and c in market.columns]
+    join_cols   = ["DateTime"] + direct_cols
     market_join = market[join_cols].rename(columns={"DateTime": "_date_key"})
     panel = panel.merge(market_join, on="_date_key", how="left").drop(columns=["_date_key"])
     panel["feat_relative_return_5d"] = (
@@ -695,28 +735,29 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     X = panel[FEATURE_COLS].values
     y = panel["label"].values
 
-    # Class-balance weight: penalise majority class proportionally
+    # Class-balance weight
     spw = n_sell / max(n_buy, 1)
-
-    XGB_BASE = dict(
-        max_depth=4, learning_rate=0.03,
-        min_child_weight=5, gamma=0.2,
-        reg_alpha=0.5, reg_lambda=1.0,
-        subsample=0.8, colsample_bytree=0.8, random_state=42,
-        scale_pos_weight=spw,
-        eval_metric="logloss", verbosity=0,
-    )
-    CV_TREES  = 300   # fixed depth for CV — avoids degenerate early-stop in small folds
-    FIN_TREES = 300   # stable final model
-
     print(f"\nClass balance weight (SELL/BUY): {spw:.3f}")
+
+    # ── CV: fixed-depth LightGBM — no early stopping so small early folds stay stable ──
+    def _cv_lgbm(seed: int) -> lgb.LGBMClassifier:
+        return lgb.LGBMClassifier(
+            n_estimators=400, learning_rate=0.03,
+            max_depth=5, num_leaves=31, min_child_samples=40,
+            feature_fraction=0.80, bagging_fraction=0.80, bagging_freq=5,
+            lambda_l1=0.2, lambda_l2=1.0,
+            scale_pos_weight=spw,
+            objective="binary", metric="binary_logloss",
+            verbose=-1, n_jobs=-1, random_state=seed,
+        )
+
     print(f"\nWalk-forward CV (PurgedTimeSeriesSplit, 5 folds, embargo=10d):")
     ptscv = PurgedTimeSeriesSplit(n_splits=5, embargo_size=EMBARGO_SIZE)
     fold_accs, fold_precs, fold_recs, fold_srecs = [], [], [], []
 
     for i, (tr, te) in enumerate(ptscv.split(X), 1):
-        m = XGBClassifier(n_estimators=CV_TREES, **XGB_BASE)
-        m.fit(X[tr], y[tr], verbose=False)
+        m = _cv_lgbm(42)
+        m.fit(X[tr], y[tr])
         y_pred  = m.predict(X[te])
         acc     = accuracy_score(y[te], y_pred)
         prec    = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
@@ -763,8 +804,27 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print(f"Final train : {(~oot_mask).sum():,} samples  "
           f"[{unique_dates[0]} → {unique_dates[-31]}]")
 
-    final = XGBClassifier(n_estimators=FIN_TREES, **XGB_BASE)
-    final.fit(X_train_final, y_train_final, verbose=False)
+    # ── 3-model LightGBM ensemble, fixed 500 trees ──
+    # Early stopping is skipped: the last 15% of training can sit in a different
+    # market regime and cause spurious early abort (iter=2-9). Fixed depth is
+    # more stable; 500 trees at lr=0.01 is well-regularised for this data size.
+    _ens_cfgs  = [(42, 0.70, 0.80), (43, 0.65, 0.75), (44, 0.75, 0.85)]
+    models_ens = []
+    for seed, col_frac, row_frac in _ens_cfgs:
+        m = lgb.LGBMClassifier(
+            n_estimators=500, learning_rate=0.01,
+            max_depth=5, num_leaves=31, min_child_samples=40,
+            feature_fraction=col_frac, bagging_fraction=row_frac, bagging_freq=5,
+            lambda_l1=0.2, lambda_l2=1.0,
+            scale_pos_weight=spw,
+            objective="binary", metric="binary_logloss",
+            verbose=-1, n_jobs=-1, random_state=seed,
+        )
+        m.fit(X_train_final, y_train_final)
+        print(f"  Ensemble seed={seed}: done")
+        models_ens.append(m)
+
+    final = LGBMEnsemble(models_ens)
 
     # Honest OOT evaluation
     oot_acc = oot_prec = oot_rec = float("nan")
@@ -811,7 +871,7 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print(f"Class balance     : BUY {n_buy/len(panel)*100:.1f}%  SELL {n_sell/len(panel)*100:.1f}%")
     print(f"scale_pos_weight  : {spw:.3f}")
     print(f"Features          : {len(FEATURE_COLS)}")
-    print(f"Final trees       : {FIN_TREES}")
+    print(f"Final model       : 3-model LightGBM ensemble")
     print(f"CV accuracy       : {mean_acc:.3f}  (±{std_acc:.3f})")
     print(f"CV SELL recall    : {mean_srec:.3f}")
     print(f"OOT accuracy      : {oot_acc:.3f}")
