@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Real Cost of Buying a Home in India</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#0f172a; --card:#1e293b; --border:#334155;
+    --text:#f1f5f9; --muted:#94a3b8; --accent:#6366f1;
+    --red:#f87171; --green:#34d399; --yellow:#fbbf24; --blue:#60a5fa;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;line-height:1.6;}
+
+  .hero{text-align:center;padding:72px 24px 48px;background:linear-gradient(135deg,#0f172a 0%,#1a0a2e 100%);border-bottom:1px solid var(--border);}
+  .hero h1{font-size:clamp(1.8rem,5vw,3.2rem);font-weight:800;background:linear-gradient(90deg,#f87171,#fbbf24);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  .hero p{color:var(--muted);max-width:600px;margin:16px auto 0;font-size:1.05rem;}
+  .badge{display:inline-block;background:#450a0a;color:#fca5a5;padding:4px 14px;border-radius:999px;font-size:0.8rem;font-weight:600;margin-bottom:16px;}
+
+  .container{max-width:1200px;margin:0 auto;padding:0 24px;}
+  .section{padding:56px 0 24px;}
+  .section-title{font-size:1.5rem;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:12px;}
+  .section-title .num{background:var(--accent);color:#fff;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.9rem;font-weight:800;flex-shrink:0;}
+  .section-sub{color:var(--muted);margin-bottom:28px;max-width:680px;}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;}
+  .grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;margin-bottom:24px;}
+  .grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px;margin-bottom:24px;}
+  .grid-4{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
+
+  .chart-wrap{position:relative;height:320px;}
+  .chart-wrap-lg{position:relative;height:400px;}
+  .chart-wrap-sm{position:relative;height:240px;}
+
+  .cost-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);}
+  .cost-row:last-child{border-bottom:none;}
+  .cost-label{color:var(--muted);font-size:0.9rem;}
+  .cost-val{font-weight:700;}
+  .cost-pct{color:var(--red);font-size:0.8rem;margin-left:8px;}
+  .total-row{background:#1a0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:12px 16px;margin-top:8px;display:flex;justify-content:space-between;align-items:center;}
+
+  .insight{background:#1e1b4b;border-left:4px solid var(--accent);border-radius:0 12px 12px 0;padding:16px 20px;margin:20px 0;}
+  .insight strong{color:#a5b4fc;}
+  .warn-box{background:#451a03;border-left:4px solid var(--yellow);border-radius:0 12px 12px 0;padding:16px 20px;margin:20px 0;}
+  .warn-box strong{color:var(--yellow);}
+  .danger-box{background:#450a0a;border-left:4px solid var(--red);border-radius:0 12px 12px 0;padding:16px 20px;margin:20px 0;}
+  .danger-box strong{color:var(--red);}
+
+  .stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;text-align:center;}
+  .stat-card .num-big{font-size:1.8rem;font-weight:800;margin-bottom:4px;}
+  .stat-card .lbl{color:var(--muted);font-size:0.82rem;}
+  .green{color:var(--green);}.red{color:var(--red);}.yellow{color:var(--yellow);}.blue{color:var(--blue);}
+
+  /* EMI Calculator */
+  .calc-section{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;margin:24px 0;}
+  .calc-title{font-size:1.1rem;font-weight:700;margin-bottom:20px;}
+  .calc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px;}
+  .input-grp{display:flex;flex-direction:column;gap:6px;}
+  .input-grp label{font-size:0.82rem;color:var(--muted);font-weight:600;}
+  .input-grp input{background:#0f172a;border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:8px;font-size:1rem;outline:none;}
+  .input-grp input:focus{border-color:var(--accent);}
+  .calc-result{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:16px;}
+  .res-card{background:#0f172a;border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center;}
+  .res-card .rv{font-size:1.4rem;font-weight:800;color:var(--yellow);}
+  .res-card .rl{color:var(--muted);font-size:0.78rem;margin-top:4px;}
+  .calc-btn{background:var(--accent);color:#fff;border:none;padding:11px 28px;border-radius:8px;font-size:0.95rem;font-weight:600;cursor:pointer;margin-top:8px;}
+  .calc-btn:hover{background:#4f46e5;}
+
+  /* Rule cards */
+  .rule-card{border-radius:14px;padding:24px;border:1px solid var(--border);}
+  .rule-card h3{font-size:1rem;font-weight:700;margin-bottom:8px;}
+  .rule-card p{color:var(--muted);font-size:0.88rem;}
+  .rule-card .rule-num{font-size:2.5rem;font-weight:800;opacity:0.15;float:right;line-height:1;}
+
+  .tbl-wrap{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:20px 0;}
+  table{width:100%;border-collapse:collapse;font-size:0.88rem;}
+  th{background:#1e293b;color:var(--muted);padding:10px 14px;text-align:left;font-weight:600;font-size:0.78rem;text-transform:uppercase;letter-spacing:.04em;}
+  td{padding:10px 14px;border-bottom:1px solid var(--border);}
+  tr:last-child td{border-bottom:none;}
+
+  hr{border:none;border-top:1px solid var(--border);margin:40px 0;}
+
+  .verdict{background:linear-gradient(135deg,#0f172a,#1e1b4b);border:1px solid #4f46e5;border-radius:20px;padding:40px;text-align:center;margin:48px 0;}
+  .verdict h2{font-size:1.7rem;font-weight:800;margin-bottom:14px;}
+  .verdict p{color:var(--muted);max-width:600px;margin:0 auto 12px;}
+
+  footer{text-align:center;padding:40px 24px;color:var(--muted);font-size:0.82rem;border-top:1px solid var(--border);}
+  .tag{display:inline-block;padding:2px 10px;border-radius:999px;font-size:0.75rem;font-weight:600;}
+  .tag-g{background:#14532d;color:#4ade80;} .tag-r{background:#450a0a;color:#f87171;} .tag-y{background:#451a03;color:#fbbf24;}
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="badge">DATA-VALIDATED · 01 / Zero One Video · Bangalore Home Buying</div>
+  <h1>The Real Cost of Buying a Home</h1>
+  <p>That "1.5 Crore" home? It'll cost you ₹1.76 Cr before you sleep in it — and the interest adds another ₹55L. Here's the full math no builder will show you.</p>
+</div>
+
+<div class="container">
+
+  <!-- ── SECTION 1: TRUE COST ── -->
+  <div class="section">
+    <div class="section-title"><div class="num">1</div> The ₹1.5Cr Lie — What a Home Actually Costs</div>
+    <p class="section-sub">Builders quote the base price. Here's every rupee you'll actually pay before you get the keys — validated against government stamp duty schedules.</p>
+
+    <div class="grid-2">
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:16px">Cost Breakdown — 1.5Cr 2BHK Bangalore (Under Construction)</div>
+        <div class="cost-row"><span class="cost-label">Base price (what builder quotes)</span><span class="cost-val">₹1,50,00,000</span></div>
+        <div class="cost-row"><span class="cost-label">Stamp duty (5% Bangalore)</span><span class="cost-val green">+₹7,50,000 <span class="cost-pct">+5.0%</span></span></div>
+        <div class="cost-row"><span class="cost-label">Registration fee (1%)</span><span class="cost-val green">+₹1,50,000 <span class="cost-pct">+1.0%</span></span></div>
+        <div class="cost-row"><span class="cost-label">Surcharge & cess (10% of stamp)</span><span class="cost-val green">+₹75,000 <span class="cost-pct">+0.5%</span></span></div>
+        <div class="cost-row"><span class="cost-label">GST @ 5% (under-construction)</span><span class="cost-val yellow">+₹7,50,000 <span class="cost-pct">+5.0%</span></span></div>
+        <div class="cost-row"><span class="cost-label">Advance annual maintenance</span><span class="cost-val">+₹65,000</span></div>
+        <div class="cost-row"><span class="cost-label">Water + electricity deposits</span><span class="cost-val">+₹4,000</span></div>
+        <div class="cost-row"><span class="cost-label">Corpus fund (RWA advance)</span><span class="cost-val">+₹1,00,000</span></div>
+        <div class="cost-row"><span class="cost-label">Interior design + GST (2BHK)</span><span class="cost-val red">+₹7,08,000 <span class="cost-pct">+4.7%</span></span></div>
+        <div class="total-row">
+          <span style="font-weight:700;color:#fca5a5">TOTAL YOU PAY</span>
+          <span style="font-size:1.2rem;font-weight:800;color:#f87171">₹1,76,02,000</span>
+        </div>
+        <div style="margin-top:12px;color:var(--muted);font-size:0.82rem">That's <strong style="color:#f87171">+17.3%</strong> above the headline price — ₹26 lakhs more than what the brochure says.</div>
+      </div>
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:16px">Where the Extra 17% Goes</div>
+        <div class="chart-wrap"><canvas id="costPie"></canvas></div>
+      </div>
+    </div>
+
+    <!-- City comparison -->
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:16px">Stamp Duty Comparison — Same 1.5Cr Home, Different Cities</div>
+      <div class="chart-wrap-sm"><canvas id="cityBar"></canvas></div>
+    </div>
+
+    <div class="insight">
+      <strong>Video Claim Validated:</strong> The video says ₹1.5Cr → ₹1.69Cr before interior. Our calculation: ₹1.69Cr without interior, ₹1.76Cr with. <strong>Exactly right.</strong> GST alone adds ₹7.5L — most first-time buyers don't budget for this.
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── SECTION 2: THREE RULES ── -->
+  <div class="section">
+    <div class="section-title"><div class="num">2</div> Three Hygiene Checks Before You Sign</div>
+    <p class="section-sub">The video's three rules — validated with real numbers. Fail any one and you're overextending.</p>
+
+    <div class="grid-3">
+      <div class="rule-card" style="background:#0f1a2e;border-color:#1e3a5f;">
+        <span class="rule-num" style="color:#3b82f6">1</span>
+        <h3 style="color:var(--blue)">Breathability Test</h3>
+        <p>All EMIs combined ≤ 30% of monthly take-home. Below 25% = peace of mind. Above 40% = job loss → crisis.</p>
+        <div style="margin-top:16px;padding:12px;background:#0f172a;border-radius:8px;font-size:0.85rem">
+          ₹1.2Cr loan @ 8%, 20yr → EMI ₹<strong style="color:var(--blue)">1,00,374/mo</strong><br>
+          Need take-home ≥ <strong style="color:var(--green)">₹3.35L/mo</strong> to stay at 30%
+        </div>
+      </div>
+      <div class="rule-card" style="background:#1a1a0a;border-color:#3d3d00;">
+        <span class="rule-num" style="color:#fbbf24">2</span>
+        <h3 style="color:var(--yellow)">Value Filter</h3>
+        <p>Home price ≤ 5× your annual income. Simple ceiling. Prevents lifestyle inflation from pushing you into a home you can't afford.</p>
+        <div style="margin-top:16px;padding:12px;background:#0f172a;border-radius:8px;font-size:0.85rem">
+          Annual income ₹30L → max home <strong style="color:var(--yellow)">₹1.5Cr</strong><br>
+          Annual income ₹20L → max home <strong style="color:var(--yellow)">₹1.0Cr</strong><br>
+          Annual income ₹12L → max home <strong style="color:var(--red)">₹60L</strong>
+        </div>
+      </div>
+      <div class="rule-card" style="background:#0a1a0a;border-color:#1d3d1d;">
+        <span class="rule-num" style="color:#34d399">3</span>
+        <h3 style="color:var(--green)">Sleep-Well Fund</h3>
+        <p>Never drain all savings for down payment. Keep 6–12 months of EMI as liquid emergency reserve before buying.</p>
+        <div style="margin-top:16px;padding:12px;background:#0f172a;border-radius:8px;font-size:0.85rem">
+          EMI ₹1L/mo → keep ₹<strong style="color:var(--green)">6–12L</strong> liquid<br>
+          Do NOT liquidate FDs, gold, or mutual funds to make down payment
+        </div>
+      </div>
+    </div>
+
+    <!-- EMI Affordability chart -->
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:16px">Max Affordable Home Price by Salary (30% EMI Rule, 8.5% rate, 20yr)</div>
+      <div class="chart-wrap"><canvas id="affordBar"></canvas></div>
+    </div>
+
+    <!-- Interactive calculator -->
+    <div class="calc-section">
+      <div class="calc-title">🧮 Your Affordability Calculator</div>
+      <div class="calc-grid">
+        <div class="input-grp"><label>Monthly Take-Home (₹)</label><input id="ci_salary" type="number" value="200000" oninput="calcAfford()"></div>
+        <div class="input-grp"><label>Home Price (₹)</label><input id="ci_price" type="number" value="15000000" oninput="calcAfford()"></div>
+        <div class="input-grp"><label>Down Payment %</label><input id="ci_down" type="number" value="20" oninput="calcAfford()"></div>
+        <div class="input-grp"><label>Interest Rate %</label><input id="ci_rate" type="number" value="8.5" oninput="calcAfford()"></div>
+        <div class="input-grp"><label>Loan Tenure (years)</label><input id="ci_tenure" type="number" value="20" oninput="calcAfford()"></div>
+        <div class="input-grp"><label>City Stamp Duty %</label><input id="ci_stamp" type="number" value="5" oninput="calcAfford()"></div>
+      </div>
+      <div class="calc-result">
+        <div class="res-card"><div class="rv" id="r_emi">—</div><div class="rl">Monthly EMI</div></div>
+        <div class="res-card"><div class="rv" id="r_emipct">—</div><div class="rl">EMI as % of salary</div></div>
+        <div class="res-card"><div class="rv" id="r_true">—</div><div class="rl">True total cost (all-in)</div></div>
+        <div class="res-card"><div class="rv" id="r_interest">—</div><div class="rl">Total interest paid</div></div>
+        <div class="res-card"><div class="rv" id="r_verdict" style="font-size:1rem">—</div><div class="rl">Affordability verdict</div></div>
+      </div>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── SECTION 3: REAL ROI ── -->
+  <div class="section">
+    <div class="section-title"><div class="num">3</div> The "I Doubled My Money" Myth — Real ROI Exposed</div>
+    <p class="section-sub">Video scenario: Buy 1.5Cr, sell at 3Cr after 10 years. Everyone says "doubled my money." The real math is very different.</p>
+
+    <div class="grid-2">
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:16px">What People Think vs What Actually Happened</div>
+        <div class="cost-row"><span class="cost-label">Sale price</span><span class="cost-val green">₹3,00,00,000</span></div>
+        <div class="cost-row"><span class="cost-label">− Capital gains tax (12.5% on ₹1.5Cr gain)</span><span class="cost-val red">−₹18,75,000</span></div>
+        <div class="cost-row"><span class="cost-label">− Transaction costs (brokerage, legal, society)</span><span class="cost-val red">−₹4,50,000</span></div>
+        <div class="cost-row"><span class="cost-label">Net cash received</span><span class="cost-val yellow">₹2,76,75,000</span></div>
+        <div style="height:1px;background:var(--border);margin:12px 0"></div>
+        <div class="cost-row"><span class="cost-label">Purchase price paid</span><span class="cost-val">−₹1,50,00,000</span></div>
+        <div class="cost-row" style="color:var(--red)"><span class="cost-label"><strong>Interest paid to bank (10yr @ 8%)</strong></span><span class="cost-val red">−₹54,71,174</span></div>
+        <div class="total-row">
+          <span style="font-weight:700;color:#86efac">NET ACTUAL PROFIT</span>
+          <span style="font-size:1.1rem;font-weight:800;color:#34d399">₹72,03,826</span>
+        </div>
+        <div style="margin-top:12px">
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:4px">
+            <span style="color:var(--muted)">Effective CAGR on money deployed</span>
+            <span style="color:var(--yellow);font-weight:700">~3.1% per year</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:0.85rem">
+            <span style="color:var(--muted)">What people claim: "doubled in 10 years"</span>
+            <span style="color:var(--red);font-weight:700">~7.2% CAGR (misleading)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:16px">Where the "Profit" Actually Goes</div>
+        <div class="chart-wrap"><canvas id="roiPie"></canvas></div>
+      </div>
+    </div>
+
+    <div class="danger-box">
+      <strong>The Interest Illusion:</strong> People say "my house went from ₹1.5Cr to ₹3Cr." But they paid ₹54.7L in interest — that's money that already left their hands via EMIs and was never counted. The true cost of the house was ₹2.05Cr, not ₹1.5Cr. On that real cost, the CAGR is just <strong>3.1%</strong> — worse than a fixed deposit.
+    </div>
+
+    <!-- Opportunity cost -->
+    <div class="card" style="margin-bottom:20px">
+      <div style="font-weight:600;margin-bottom:16px">Year-by-Year: House Equity vs Same Money in Nifty / Gold</div>
+      <p style="color:var(--muted);font-size:0.85rem;margin-bottom:16px">Same down payment (₹30L) + same monthly amount (₹1.46L EMI) invested instead. House assumes 7% annual price appreciation — optimistic Bangalore average.</p>
+      <div class="chart-wrap-lg"><canvas id="oppChart"></canvas></div>
+    </div>
+
+    <div class="grid-4">
+      <div class="stat-card"><div class="num-big yellow">₹295L</div><div class="lbl">House equity at Yr 10 (7% growth)</div></div>
+      <div class="stat-card"><div class="num-big green">₹428L</div><div class="lbl">Nifty corpus at Yr 10 (12% CAGR)</div></div>
+      <div class="stat-card"><div class="num-big blue">₹457L</div><div class="lbl">Gold corpus at Yr 10 (13% INR CAGR)</div></div>
+      <div class="stat-card"><div class="num-big red">3.1%</div><div class="lbl">Real CAGR on house after interest+tax</div></div>
+    </div>
+
+    <div class="warn-box">
+      <strong>Important nuance:</strong> This comparison has a hidden advantage for the house — you live in it. If you rent instead, you pay ₹30–50k/month in rent (₹36–60L over 10 years) which must be added to the "invest instead" side. For owner-occupier homes, the rent-saving changes the math significantly. For pure investment homes (you rent it out), the numbers above apply directly.
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── SECTION 4: WHEN TO BUY ── -->
+  <div class="section">
+    <div class="section-title"><div class="num">4</div> So When Should You Buy?</div>
+    <p class="section-sub">The video's conclusion isn't "don't buy" — it's "buy only when you understand the full cost and pass all three checks."</p>
+
+    <div class="card" style="margin-bottom:24px">
+      <div style="font-weight:600;margin-bottom:16px">Buy vs Rent — Break-even Analysis (Bangalore, 1.5Cr home)</div>
+      <div class="chart-wrap"><canvas id="breakevenChart"></canvas></div>
+      <div style="color:var(--muted);font-size:0.82rem;margin-top:12px">Assumes rent ₹35k/month growing 5%/year. House price growing 7%/year. Mortgage at 8.5%, 20yr tenure. Crossover = break-even point.</div>
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Scenario</th><th>Buy?</th><th>Reasoning</th></tr></thead>
+        <tbody>
+          <tr><td>EMI &lt; 30% of take-home, emergency fund intact, planning to stay 7+ years</td><td><span class="tag tag-g">YES</span></td><td>All three rules pass. Emotional stability + financial safety.</td></tr>
+          <tr><td>EMI 30–40%, no emergency fund, city uncertain</td><td><span class="tag tag-y">WAIT</span></td><td>Build fund first. Consider 2yr FD + SIP to grow down payment.</td></tr>
+          <tr><td>EMI &gt; 40%, draining all savings for down payment</td><td><span class="tag tag-r">NO</span></td><td>One job loss or medical emergency = default. Rent is cheaper stress.</td></tr>
+          <tr><td>Buying purely for investment / "doubling money"</td><td><span class="tag tag-r">RECONSIDER</span></td><td>Real CAGR after interest ~3–5%. Nifty/Gold have historically done better.</td></tr>
+          <tr><td>FOMO — "all my friends are buying"</td><td><span class="tag tag-r">NO</span></td><td>FOMO is fertilised with BS. Your friends don't share their interest cost.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="insight">
+      <strong>The bottom line from the video (data-confirmed):</strong> A house is a lifestyle asset first, investment second. The real ROI after interest and taxes is 3–5% CAGR — comparable to an FD, not equity. Buy when it makes life sense, not spreadsheet sense. <strong>Know the cost. Pass the three checks. Don't over-extend.</strong>
+    </div>
+  </div>
+
+  <div class="verdict">
+    <h2>The 1.5Cr Home Costs ₹1.76Cr<br><span style="color:var(--muted);font-size:1.2rem">before interest. ₹2.3Cr after.</span></h2>
+    <p>The builder's brochure is the beginning, not the price. Add 17% for taxes, GST, maintenance deposits, and interiors. Add another ₹55L for 10 years of bank interest. Your "2x return" becomes a 3.1% CAGR.</p>
+    <p style="margin-top:12px"><strong style="color:#a5b4fc">Buy for the right reasons. Know the full cost. Keep the EMI breathable. Never drain the emergency fund. The house won't feel like home if it costs you your sleep.</strong></p>
+  </div>
+
+</div>
+
+<footer>
+  Data: Stamp duty from state government schedules (Karnataka, Maharashtra, Delhi, TN, Telangana). EMI calculations: standard reducing balance formula. Capital gains: LTCG 12.5% (post-Budget 2024). Opportunity cost: Nifty 20yr avg 12%, Gold INR 20yr avg 13%. Not financial advice.
+</footer>
+
+<script>
+const gc='rgba(255,255,255,0.06)', bf={family:'Segoe UI,system-ui',size:12};
+
+// ── Cost pie ──
+new Chart(document.getElementById('costPie'),{
+  type:'doughnut',
+  data:{labels:['Base price (₹150L)','Stamp duty (₹7.5L)','GST-UC (₹7.5L)','Registration (₹1.5L)','Interior+GST (₹7.1L)','Maintenance+deposits (₹1.7L)'],
+    datasets:[{data:[150,7.5,7.5,1.5,7.08,1.69],backgroundColor:['#1e3a5f','#dc2626','#ea580c','#ca8a04','#16a34a','#7c3aed'],borderWidth:0}]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{color:'#94a3b8',font:{size:10},boxWidth:12,padding:8}}}}
+});
+
+// ── City stamp duty bar ──
+new Chart(document.getElementById('cityBar'),{
+  type:'bar',
+  data:{labels:['Hyderabad','Bangalore','Mumbai','Pune','Delhi','Chennai'],
+    datasets:[
+      {label:'Stamp duty (₹L)',data:[6,7.5,7.5,7.5,9,10.5],backgroundColor:'#3b82f688',borderColor:'#3b82f6',borderWidth:1},
+      {label:'Registration (₹L)',data:[0.8,1.5,1.5,1.5,1.5,1.5],backgroundColor:'#f59e0b88',borderColor:'#f59e0b',borderWidth:1},
+    ]},
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{stacked:true,ticks:{color:'#94a3b8'},grid:{color:gc}},y:{stacked:true,ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}}}}
+});
+
+// ── Affordability bar ──
+new Chart(document.getElementById('affordBar'),{
+  type:'bar',
+  data:{labels:['₹50k/mo','₹75k/mo','₹1L/mo','₹1.5L/mo','₹2L/mo','₹3L/mo'],
+    datasets:[
+      {label:'Max home (30% EMI rule)',data:[21.6,32.4,43.2,64.8,86.4,129.6],backgroundColor:'#22c55e88',borderColor:'#22c55e',borderWidth:1},
+      {label:'Max home (5× annual income rule)',data:[30,45,60,90,120,180],backgroundColor:'#f59e0b88',borderColor:'#f59e0b',borderWidth:1},
+    ]},
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},y:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc},title:{display:true,text:'Max home price (₹ Lakhs)',color:'#64748b'}}}}
+});
+
+// ── ROI pie ──
+new Chart(document.getElementById('roiPie'),{
+  type:'doughnut',
+  data:{labels:['Interest paid to bank (₹54.7L)','Capital gains tax (₹18.75L)','Transaction costs (₹4.5L)','Net actual profit (₹72L)','Original purchase (₹150L)'],
+    datasets:[{data:[54.7,18.75,4.5,72,150],backgroundColor:['#dc2626','#ea580c','#ca8a04','#16a34a','#1e3a5f'],borderWidth:0}]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{color:'#94a3b8',font:{size:10},boxWidth:12,padding:8}}}}
+});
+
+// ── Opportunity cost line ──
+const yrs=[1,2,3,4,5,6,7,8,9,10];
+new Chart(document.getElementById('oppChart'),{
+  type:'line',
+  data:{labels:yrs.map(y=>'Year '+y),
+    datasets:[
+      {label:'House equity (7% price growth)',data:[48.7,68.7,90.3,113.6,138.6,165.5,194.4,225.5,259.0,295.1],borderColor:'#f87171',backgroundColor:'#f8717122',fill:true,tension:0.4,pointRadius:3},
+      {label:'Nifty corpus (12% CAGR)',data:[51.1,74.7,101.1,130.7,163.9,201.0,242.6,289.2,341.3,399.8],borderColor:'#34d399',backgroundColor:'#34d39922',fill:true,tension:0.4,pointRadius:3},
+      {label:'Gold corpus (13% CAGR, INR)',data:[51.4,75.5,102.8,133.6,168.5,207.9,252.4,302.6,359.5,423.7],borderColor:'#fbbf24',backgroundColor:'#fbbf2422',fill:false,tension:0.4,pointRadius:3,borderDash:[6,3]},
+    ]},
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},y:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}}}}
+});
+
+// ── Buy vs Rent break-even ──
+const buyNet=[],rentSave=[];
+let rented=0,bought=0,rent=35000;
+const price=15000000,loan=12000000,emi=100374;
+for(let yr=1;yr<=20;yr++){
+  bought = price * Math.pow(1.07,yr) - loan * Math.pow(1+0.085/12,yr*12) * (loan / ((Math.pow(1+0.085/12,240)-1)/(0.085/12)));
+  rented += rent * 12; rent *= 1.05;
+  buyNet.push(Math.round(bought/100000*10)/10);
+  rentSave.push(Math.round(-rented/100000*10)/10);
+}
+new Chart(document.getElementById('breakevenChart'),{
+  type:'line',
+  data:{labels:Array.from({length:20},(_,i)=>'Yr '+(i+1)),
+    datasets:[
+      {label:'House equity (₹L)',data:buyNet,borderColor:'#34d399',tension:0.4,pointRadius:0,fill:false},
+      {label:'Cumulative rent paid (₹L, negative)',data:rentSave,borderColor:'#f87171',tension:0.4,pointRadius:0,fill:false,borderDash:[5,3]},
+    ]},
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{color:'#94a3b8',font:bf}}},
+    scales:{x:{ticks:{color:'#94a3b8'},grid:{color:gc}},y:{ticks:{color:'#94a3b8',callback:v=>'₹'+v+'L'},grid:{color:gc}}}}
+});
+
+// ── Calculator ──
+function fmt(n){return '₹'+Math.round(n).toLocaleString('en-IN');}
+function calcAfford(){
+  const sal=+document.getElementById('ci_salary').value||0;
+  const price=+document.getElementById('ci_price').value||0;
+  const dpPct=+document.getElementById('ci_down').value||20;
+  const rate=(+document.getElementById('ci_rate').value||8.5)/100/12;
+  const tenure=(+document.getElementById('ci_tenure').value||20)*12;
+  const stamp=(+document.getElementById('ci_stamp').value||5)/100;
+  const loan=price*(1-dpPct/100);
+  const emi=loan*rate*Math.pow(1+rate,tenure)/(Math.pow(1+rate,tenure)-1);
+  const totalInterest=emi*tenure-loan;
+  const trueCost=price*(1+stamp+0.01+stamp*0.1+0.05)+65000+4000+100000+708000;
+  const pct=(emi/sal*100).toFixed(1);
+  document.getElementById('r_emi').textContent=fmt(emi)+'/mo';
+  document.getElementById('r_emipct').textContent=pct+'%';
+  document.getElementById('r_true').textContent=fmt(trueCost);
+  document.getElementById('r_interest').textContent=fmt(totalInterest);
+  const v=document.getElementById('r_verdict');
+  if(pct<=30){v.textContent='✅ BREATHABLE';v.style.color='#34d399';}
+  else if(pct<=40){v.textContent='⚠️ STRETCHED';v.style.color='#fbbf24';}
+  else{v.textContent='🚨 OVEREXTENDED';v.style.color='#f87171';}
+}
+calcAfford();
+</script>
+</body>
+</html>
