@@ -272,8 +272,8 @@ GRADE_C_MIN = 6         # 6/8 confirmations (minimum for BUY)
 
 # ── ML meta-filter ──────────────────────────────────────────────────────────
 # Raised from 0.60 to 0.62 for precision. Strong news relaxes to 0.57.
-BUY_PROBA             = 0.65   # v5.0: tightened for higher precision
-BUY_PROBA_STRONG_NEWS = 0.60
+BUY_PROBA             = 0.55   # v5.1: recalibrated for 93-stock universe (OOT: 92% at 0.55)
+BUY_PROBA_STRONG_NEWS = 0.52
 SELL_PROBA            = 0.62
 
 # ── Event / news filters ────────────────────────────────────────────────────
@@ -741,7 +741,7 @@ def make_labels(panel: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
-    symbols = symbols or NIFTY_50
+    symbols = symbols or TRAIN_UNIVERSE   # v5.1: full 93-stock universe for richer tiers
     print(f"\n=== TRAINING v3 model on {len(symbols)} stocks × {years}y ===")
     print(f"    Purged CV embargo: {EMBARGO_SIZE} days | Features: {len(FEATURE_COLS)}\n")
 
@@ -1004,12 +1004,17 @@ def predict(symbols: list[str] | None = None):
     stock_tiers = blob.get("stock_tiers", {})   # v5.0: per-stock BUY precision tier
     model_features = blob.get("features", FEATURE_COLS)
 
-    symbols   = symbols or WATCHLIST
+    # v5.1: auto-expand watchlist with any Tier A stocks from Nifty Next 50
+    tier_a_next50 = [s for s in NIFTY_NEXT_50 if stock_tiers.get(s) == "A"]
+    effective_watchlist = list(dict.fromkeys(WATCHLIST + tier_a_next50))
+    symbols = symbols or effective_watchlist
     today     = date.today()
     from_date = today - timedelta(days=420)   # 420d for 252d 52-week + 60d momentum
 
-    print(f"\n=== v3 SIGNALS — {today} ===")
+    print(f"\n=== v5.1 SIGNALS — {today} ===")
     print(f"Model val accuracy: {val_acc*100:.1f}% on {blob['n_train']:,} samples")
+    if tier_a_next50:
+        print(f"Tier A (Next 50 promoted): {tier_a_next50}")
 
     # ── Step 1: Market regime ────────────────────────────────────────────────
     market       = _fetch_market_regime(LOOKBACK_YEARS)
@@ -1079,7 +1084,7 @@ def predict(symbols: list[str] | None = None):
 
         # Tier-adjusted threshold [v5.0]
         stock_tier = stock_tiers.get(sym, "C")
-        _tier_bar  = {"A": BUY_PROBA, "B": BUY_PROBA + 0.03, "C": BUY_PROBA + 0.07}
+        _tier_bar  = {"A": BUY_PROBA, "B": BUY_PROBA + 0.02, "C": BUY_PROBA + 0.05}
         tier_bar   = _tier_bar[stock_tier]
 
         # News + event filter
