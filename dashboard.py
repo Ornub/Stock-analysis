@@ -24,9 +24,9 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from swing_v2 import (
-    NIFTY_50, FEATURE_COLS, MODEL_PATH,
+    NIFTY_50, NIFTY_NEXT_50, FEATURE_COLS, MODEL_PATH,
     compute_features, _fetch_market_regime, classify_regime, rank_candidates,
-    ADX_MIN, BUY_PROBA, MIN_CONFIRMATIONS,
+    ADX_MIN, BUY_PROBA, BUY_PROBA_STRONG_NEWS, MIN_CONFIRMATIONS,
     REQUIRE_EMA200, REQUIRE_EMA50, REQUIRE_EMA20, REQUIRE_ADX,
     REQUIRE_MACD, REQUIRE_BREAKOUT, REQUIRE_VOLUME, VOLUME_THRESHOLD,
     GRADE_A_MIN, GRADE_B_MIN, GRADE_C_MIN,
@@ -237,6 +237,63 @@ div[data-baseweb="tab-border"]    { display:none !important; }
 }
 
 /* ── Top signal cards ────────────────────────────────────────────────── */
+/* ── Tier badges ─────────────────────────────────────────────────────── */
+.tier-A { display:inline-flex;align-items:center;gap:4px;background:linear-gradient(135deg,rgba(251,191,36,0.18),rgba(245,158,11,0.10));
+  color:#FCD34D;border:1px solid rgba(251,191,36,0.45);border-radius:6px;padding:2px 8px;
+  font-size:0.68rem;font-weight:800;letter-spacing:.5px;text-transform:uppercase; }
+.tier-B { display:inline-flex;align-items:center;gap:4px;background:rgba(148,163,184,0.12);
+  color:#CBD5E1;border:1px solid rgba(148,163,184,0.30);border-radius:6px;padding:2px 8px;
+  font-size:0.68rem;font-weight:700;letter-spacing:.5px;text-transform:uppercase; }
+.tier-C { display:inline-flex;align-items:center;gap:4px;background:rgba(100,116,139,0.10);
+  color:#64748B;border:1px solid rgba(100,116,139,0.22);border-radius:6px;padding:2px 8px;
+  font-size:0.68rem;font-weight:600;letter-spacing:.5px;text-transform:uppercase; }
+
+/* ── Premium BUY signal card ─────────────────────────────────────────── */
+@keyframes border-glow { 0%,100%{box-shadow:0 0 16px rgba(16,185,129,0.25)} 50%{box-shadow:0 0 28px rgba(16,185,129,0.45)} }
+.signal-hub-card {
+  background: linear-gradient(145deg,rgba(16,185,129,0.06) 0%,rgba(17,24,39,0.90) 50%);
+  border: 1px solid rgba(16,185,129,0.35);
+  border-left: 4px solid #10B981;
+  border-radius: 14px;
+  padding: 16px 20px;
+  backdrop-filter: blur(20px);
+  transition: all .25s ease;
+  animation: border-glow 3s ease-in-out infinite;
+  position: relative;
+  overflow: hidden;
+}
+.signal-hub-card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:1px;
+  background:linear-gradient(90deg,transparent,rgba(16,185,129,0.6),transparent);
+}
+.signal-hub-card:hover { transform:translateY(-3px); box-shadow:0 12px 40px rgba(16,185,129,0.20); }
+.signal-hub-card-watch {
+  background: linear-gradient(145deg,rgba(245,158,11,0.05) 0%,rgba(17,24,39,0.90) 50%);
+  border: 1px solid rgba(245,158,11,0.30); border-left: 4px solid #F59E0B;
+  border-radius: 14px; padding: 16px 20px; backdrop-filter: blur(20px);
+  transition: all .25s ease;
+}
+.signal-hub-card-watch:hover { transform:translateY(-2px); box-shadow:0 8px 28px rgba(245,158,11,0.15); }
+
+/* ── Probability arc bar ─────────────────────────────────────────────── */
+.prob-track { background:rgba(255,255,255,0.07); border-radius:99px; height:6px; overflow:hidden; margin:4px 0; }
+.prob-fill-green { border-radius:99px; height:6px; background:linear-gradient(90deg,#10B981,#34D399); }
+.prob-fill-amber { border-radius:99px; height:6px; background:linear-gradient(90deg,#F59E0B,#FCD34D); }
+
+/* ── Risk/Stop pill ──────────────────────────────────────────────────── */
+.stop-pill  { background:rgba(239,68,68,0.12); color:#FCA5A5; border:1px solid rgba(239,68,68,0.28);
+  border-radius:6px; padding:2px 8px; font-size:0.72rem; font-weight:600; }
+.tgt-pill   { background:rgba(16,185,129,0.12); color:#6EE7B7; border:1px solid rgba(16,185,129,0.28);
+  border-radius:6px; padding:2px 8px; font-size:0.72rem; font-weight:600; }
+.rr-pill    { background:rgba(59,130,246,0.12); color:#93C5FD; border:1px solid rgba(59,130,246,0.28);
+  border-radius:6px; padding:2px 8px; font-size:0.72rem; font-weight:600; }
+
+/* ── Gate dots ───────────────────────────────────────────────────────── */
+.gate-dot-pass { display:inline-block;width:8px;height:8px;border-radius:50%;background:#10B981;
+  box-shadow:0 0 6px rgba(16,185,129,0.5);margin:0 2px;vertical-align:middle; }
+.gate-dot-fail { display:inline-block;width:8px;height:8px;border-radius:50%;background:rgba(239,68,68,0.4);
+  border:1px solid rgba(239,68,68,0.5);margin:0 2px;vertical-align:middle; }
+
 .top-signal-card {
   background: rgba(17,24,39,0.80);
   border: 1px solid var(--border);
@@ -618,6 +675,9 @@ NEWS_FEEDS = [
 def load_model():
     if not MODEL_PATH.exists():
         return None, None
+    import __main__
+    from swing_v2 import LGBMEnsemble
+    __main__.LGBMEnsemble = LGBMEnsemble   # allow joblib unpickling from any context
     blob = joblib.load(MODEL_PATH)
     return blob["model"], blob
 
@@ -647,6 +707,12 @@ def run_scan() -> pd.DataFrame:
         return pd.DataFrame()
 
     model_features = blob.get("features", FEATURE_COLS)
+    stock_tiers    = blob.get("stock_tiers", {})   # v5.1 per-stock BUY precision tiers
+
+    # Expand scan universe: Nifty 50 + any Next-50 stocks promoted to Tier A
+    tier_a_next50  = [s for s in NIFTY_NEXT_50 if stock_tiers.get(s) == "A"]
+    scan_universe  = list(dict.fromkeys(NIFTY_50 + tier_a_next50))
+
     today     = date.today()
     from_date = today - timedelta(days=420)
 
@@ -654,7 +720,7 @@ def run_scan() -> pd.DataFrame:
     trend_regime, vol_regime = classify_regime(market)
 
     symbol_data: dict[str, pd.DataFrame] = {}
-    for sym in NIFTY_50:
+    for sym in scan_universe:
         df = fetch_historical_data(sym, from_date, today)
         if df is None or len(df) < 200:
             continue
@@ -683,6 +749,11 @@ def run_scan() -> pd.DataFrame:
         def gv(col, fb=0.0):
             return float(latest.get(col, fb) or fb)
 
+        # Stock tier + tier-adjusted probability bar
+        stock_tier  = stock_tiers.get(sym, "C")
+        _tier_bars  = {"A": BUY_PROBA, "B": BUY_PROBA + 0.02, "C": BUY_PROBA + 0.05}
+        tier_bar    = _tier_bars[stock_tier]
+
         confirmations = {
             "EMA200":   (not REQUIRE_EMA200)   or gv("feat_ema200_ratio") > 0,
             "EMA50":    (not REQUIRE_EMA50)    or gv("feat_ema50_ratio")  > 0,
@@ -691,6 +762,9 @@ def run_scan() -> pd.DataFrame:
             "MACD":     (not REQUIRE_MACD)     or gv("feat_macd_hist")    >= 0,
             "Breakout": (not REQUIRE_BREAKOUT) or gv("feat_dist_20d_high") > 0,
             "Volume":   (not REQUIRE_VOLUME)   or gv("feat_volume_ratio") >= VOLUME_THRESHOLD,
+            # Gate 8: momentum — block when BOTH stock AND Nifty in 3-day decline
+            "Momentum": (gv("feat_return_3d") >= -0.015 or
+                         gv("feat_nifty_return_3d") >= -0.015),
         }
         n_pass = sum(confirmations.values())
         passed  = [k for k, v in confirmations.items() if v]
@@ -700,14 +774,16 @@ def run_scan() -> pd.DataFrame:
                  "B" if n_pass >= GRADE_B_MIN else
                  "C" if n_pass >= GRADE_C_MIN else "D")
 
-        ema200_ok    = confirmations["EMA200"]
-        gate_pass    = ema200_ok and sym in ranked_set and not regime_blocked and n_pass >= MIN_CONFIRMATIONS
+        ema200_ok = confirmations["EMA200"]
+        tier_ok   = stock_tier in ("A", "B")
+        gate_pass = (ema200_ok and sym in ranked_set and not regime_blocked
+                     and tier_ok and n_pass >= MIN_CONFIRMATIONS)
 
-        if buy_p >= BUY_PROBA and gate_pass:
+        if buy_p >= tier_bar and gate_pass:
             signal = "BUY"
-        elif buy_p >= BUY_PROBA:
+        elif buy_p >= tier_bar:
             signal = "WATCH"
-        elif sell_p >= BUY_PROBA:
+        elif sell_p >= tier_bar:
             signal = "SELL"
         else:
             signal = "HOLD"
@@ -730,8 +806,9 @@ def run_scan() -> pd.DataFrame:
             "1D%":      round(chg, 2),
             "Signal":   signal,
             "Grade":    grade if signal in ("BUY", "WATCH") else "",
+            "Tier":     stock_tier,
             "BUY%":     round(buy_p * 100, 1),
-            "Confs":    f"{n_pass}/7",
+            "Confs":    f"{n_pass}/8",
             "RSI":      round(rsi, 1),
             "ADX":      round(adx, 1),
             "VolRatio": round(vol_r, 2),
@@ -1518,72 +1595,125 @@ with tab1:
         except Exception:
             pass
 
-    # ── Top 3 Actionable Signals ─────────────────────────────────────
+    # ── Top 3 Actionable Signals (Premium Hub) ───────────────────────
     if not scan_df.empty:
         _buys = scan_df[scan_df["Signal"] == "BUY"].copy()
-        # quality filter: exclude overbought entries and thin-volume breakouts
-        _buys_filtered = _buys[(_buys["RSI"] <= 72) & (_buys["VolRatio"] >= 1.3)]
-        top3 = _buys_filtered.head(3) if not _buys_filtered.empty else _buys.head(3)
+        # sort: Tier A first, then by BUY% desc; quality filter overbought/thin volume
+        _tier_order = {"A": 0, "B": 1, "C": 2}
+        _buys["_tier_rank"] = _buys.get("Tier", pd.Series("C", index=_buys.index)).map(_tier_order).fillna(2)
+        _buys_sorted   = _buys.sort_values(["_tier_rank", "BUY%"], ascending=[True, False])
+        _buys_filtered = _buys_sorted[(_buys_sorted["RSI"] <= 72) & (_buys_sorted["VolRatio"] >= 1.3)]
+        top3 = _buys_filtered.head(3) if not _buys_filtered.empty else _buys_sorted.head(3)
         _top3_is_watch = top3.empty
         if _top3_is_watch:
             top3 = scan_df[scan_df["Signal"] == "WATCH"].head(3)
 
         if not top3.empty:
-            if _top3_is_watch:
-                st.markdown("#### Best Watch Candidates")
-                st.caption("No qualifying BUY signals today — showing highest-conviction WATCH setups.")
-            else:
-                st.markdown("#### Top BUY Signals Today")
+            _hub_label = "Best Watch Candidates" if _top3_is_watch else "Top BUY Signals Today"
+            _hub_sub   = ("<span style='font-size:0.72rem;color:#94a3b8;margin-left:10px'>"
+                          "No qualifying BUYs — showing WATCH setups</span>") if _top3_is_watch else ""
+            st.markdown(
+                f"<div style='display:flex;align-items:center;margin-bottom:14px'>"
+                f"<span style='font-size:1.05rem;font-weight:700;color:#F8FAFC'>{_hub_label}</span>"
+                f"{_hub_sub}</div>",
+                unsafe_allow_html=True
+            )
             t_cols = st.columns(len(top3))
             for col, (_, row) in zip(t_cols, top3.iterrows()):
-                sig   = row["Signal"]
-                grade = row.get("Grade", "")
-                color = SIGNAL_COLORS[sig]
-                bg    = SIGNAL_BG[sig]
+                sig    = row["Signal"]
+                grade  = row.get("Grade", "")
+                tier   = str(row.get("Tier", "C"))
                 conf_w = int(row["BUY%"])
-                expl  = explain_signal(sig, row.get("Passed",""), row.get("Blockers",""),
-                                        row["BUY%"], grade)
-                stop_s   = f"<br><span style='color:#64748b;font-size:0.75rem'>Stop ₹{row['Stop']:,.1f}</span>" if pd.notna(row.get("Stop")) else ""
-                tgt_s    = f" · Target ₹{row['Target']:,.1f}" if pd.notna(row.get("Target")) else ""
-                warn_tags = ""
+                sector = str(row.get("Sector", "")) or "—"
+                confs  = str(row.get("Confs", "0/8"))
+
+                chg_color = "#10B981" if row["1D%"] >= 0 else "#EF4444"
+
+                # gate dots from Confs e.g. "7/8"
+                try:
+                    n_pass_g, n_total_g = [int(x) for x in confs.split("/")]
+                except Exception:
+                    n_pass_g, n_total_g = 0, 8
+                gate_dots = (
+                    "".join(["<span class='gate-dot-pass'></span>"] * n_pass_g) +
+                    "".join(["<span class='gate-dot-fail'></span>"] * max(0, n_total_g - n_pass_g))
+                )
+
+                # risk pills
+                has_stop = pd.notna(row.get("Stop"))
+                has_tgt  = pd.notna(row.get("Target"))
+                stop_html = f"<span class='stop-pill'>⬇ ₹{row['Stop']:,.0f}</span>" if has_stop else ""
+                tgt_html  = f"<span class='tgt-pill'>⬆ ₹{row['Target']:,.0f}</span>" if has_tgt else ""
+                rr_html   = ""
+                if has_stop and has_tgt:
+                    _risk   = row["Price"] - row["Stop"]
+                    _reward = row["Target"] - row["Price"]
+                    if _risk > 0:
+                        rr_html = f"<span class='rr-pill'>R:R {_reward/_risk:.1f}×</span>"
+
+                # warning tags
+                warn_html = ""
                 if row.get("RSI_warn"):
-                    warn_tags += "<span style='font-size:0.68rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:1px 6px;margin-right:4px'>⚠ RSI>70</span>"
+                    warn_html += ("<span style='font-size:0.65rem;background:rgba(251,191,36,0.12);"
+                                  "color:#FCD34D;border-radius:4px;padding:2px 6px;margin-right:4px'>⚠ RSI&gt;70</span>")
                 if row.get("ATR_warn"):
-                    warn_tags += "<span style='font-size:0.68rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 6px'>⚠ Wide ATR</span>"
-                col.markdown(f"""
-<div class='top-signal-card' style='border-top: 3px solid {color}'>
-  <div style='display:flex;justify-content:space-between;align-items:center'>
-    <span style='font-size:1.05rem;font-weight:800;color:#F8FAFC'>{row['Symbol']}</span>
-    <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
-  </div>
-  <div style='color:#CBD5E1;font-size:1.0rem;font-weight:700;margin:4px 0'>₹{row['Price']:,.1f}
-    <span style='font-size:0.82rem;color:{"#16a34a" if row["1D%"]>=0 else "#dc2626"}'>{row["1D%"]:+.2f}%</span>
-  </div>
-  <div style='font-size:0.72rem;color:#64748b'>RSI {row['RSI']:.0f} · ADX {row['ADX']:.0f} · Vol×{row['VolRatio']:.1f}</div>
-  <div style='margin:6px 0'>
-    <div style='font-size:0.68rem;color:#64748b;margin-bottom:2px'>Confidence {conf_w}%</div>
-    <div class='conf-bar-wrap'>
-      <div class='conf-bar-fill' style='width:{conf_w}%;background:{color}'></div>
+                    warn_html += ("<span style='font-size:0.65rem;background:rgba(239,68,68,0.10);"
+                                  "color:#FCA5A5;border-radius:4px;padding:2px 6px'>⚠ Wide ATR</span>")
+
+                tier_labels = {"A": "★ TIER A", "B": "◈ TIER B", "C": "· TIER C"}
+                tier_label  = tier_labels.get(tier, "TIER C")
+                card_cls    = "signal-hub-card-watch" if _top3_is_watch else "signal-hub-card"
+                prob_cls    = "prob-fill-amber" if _top3_is_watch else "prob-fill-green"
+
+                col.markdown(f"""<div class='{card_cls}'>
+  <div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px'>
+    <div>
+      <div style='font-size:1.12rem;font-weight:800;color:#F8FAFC;letter-spacing:.5px'>{row["Symbol"]}</div>
+      <div style='font-size:0.63rem;color:#64748b;margin-top:2px;text-transform:uppercase;letter-spacing:.5px'>{sector}</div>
+    </div>
+    <div style='display:flex;flex-direction:column;align-items:flex-end;gap:5px'>
+      <span class='tier-{tier}'>{tier_label}</span>
+      <span class='badge badge-{sig}'>{sig}{" " + grade if grade else ""}</span>
     </div>
   </div>
-  {stop_s}{tgt_s}
-  {warn_tags}
-  <div style='font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4'>{expl}</div>
+  <div style='display:flex;align-items:baseline;gap:8px;margin-bottom:10px'>
+    <span style='font-size:1.18rem;font-weight:700;color:#F8FAFC'>₹{row["Price"]:,.1f}</span>
+    <span style='font-size:0.82rem;font-weight:600;color:{chg_color}'>{row["1D%"]:+.2f}%</span>
+  </div>
+  <div style='margin-bottom:10px'>
+    <div style='display:flex;justify-content:space-between;font-size:0.65rem;color:#64748b;margin-bottom:3px'>
+      <span style='letter-spacing:.5px'>BUY PROBABILITY</span>
+      <span style='color:#10B981;font-weight:700;font-size:0.72rem'>{conf_w}%</span>
+    </div>
+    <div class='prob-track'><div class='{prob_cls}' style='width:{conf_w}%'></div></div>
+  </div>
+  <div style='margin-bottom:10px'>
+    <div style='font-size:0.63rem;color:#475569;letter-spacing:.5px;margin-bottom:5px'>GATES PASSED &nbsp;<b style='color:#CBD5E1'>{confs}</b></div>
+    <div style='display:flex;gap:5px'>{gate_dots}</div>
+  </div>
+  <div style='display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px'>{stop_html}{tgt_html}{rr_html}</div>
+  <div style='font-size:0.68rem;color:#475569'>
+    RSI <b style='color:#CBD5E1'>{row["RSI"]:.0f}</b>&nbsp;·&nbsp;ADX <b style='color:#CBD5E1'>{row["ADX"]:.0f}</b>&nbsp;·&nbsp;Vol× <b style='color:#CBD5E1'>{row["VolRatio"]:.1f}</b>
+  </div>
+  {f"<div style='margin-top:6px'>{warn_html}</div>" if warn_html else ""}
 </div>""", unsafe_allow_html=True)
 
     # ── Signal count summary row (full width) ────────────────────────
     if not scan_df.empty:
         sig_counts = scan_df["Signal"].value_counts()
-        _sig_colors = {"BUY":"#16a34a","WATCH":"#ca8a04","HOLD":"#64748b","SELL":"#dc2626"}
-        _sig_bg     = {"BUY":"#dcfce7","WATCH":"#fef9c3","HOLD":"#f1f5f9","SELL":"#fee2e2"}
+        _sig_colors = {"BUY":"#10B981","WATCH":"#F59E0B","HOLD":"#64748b","SELL":"#EF4444"}
+        _sig_bg     = {"BUY":"rgba(16,185,129,0.10)","WATCH":"rgba(245,158,11,0.10)",
+                       "HOLD":"rgba(100,116,139,0.10)","SELL":"rgba(239,68,68,0.10)"}
+        _sig_border = {"BUY":"rgba(16,185,129,0.30)","WATCH":"rgba(245,158,11,0.30)",
+                       "HOLD":"rgba(100,116,139,0.20)","SELL":"rgba(239,68,68,0.30)"}
         _cnt_cols = st.columns([1, 1, 1, 1, 6])
         for col_m, sig in zip(_cnt_cols[:4], ["BUY","WATCH","HOLD","SELL"]):
             n = sig_counts.get(sig, 0)
             col_m.markdown(
-                f"<div style='background:{_sig_bg[sig]};border:1px solid {_sig_colors[sig]}33;"
+                f"<div style='background:{_sig_bg[sig]};border:1px solid {_sig_border[sig]};"
                 f"border-radius:10px;padding:10px 6px;text-align:center'>"
-                f"<div style='font-size:1.4rem;font-weight:800;color:{_sig_colors[sig]}'>{n}</div>"
-                f"<div style='font-size:0.72rem;font-weight:600;color:{_sig_colors[sig]}'>{sig}</div>"
+                f"<div style='font-size:1.5rem;font-weight:800;color:{_sig_colors[sig]}'>{n}</div>"
+                f"<div style='font-size:0.68rem;font-weight:700;color:{_sig_colors[sig]};letter-spacing:.5px'>{sig}</div>"
                 f"</div>", unsafe_allow_html=True
             )
 
@@ -1649,39 +1779,82 @@ with tab1:
             pills_html += f"<span class='intel-pill {cls}'>{text}</span> &nbsp;"
         st.markdown(f"<div style='margin:4px 0 8px'>{pills_html}</div>", unsafe_allow_html=True)
 
-        # Signal card with explanation
+        # Signal card with explanation (premium styled)
         if not scan_df.empty:
             sr_row = scan_df[scan_df["Symbol"] == selected_symbol]
             if not sr_row.empty:
                 sr     = sr_row.iloc[0]
                 sig    = sr["Signal"]
                 color  = SIGNAL_COLORS.get(sig, "#64748b")
-                bg     = SIGNAL_BG.get(sig, "#f1f5f9")
                 grade  = sr.get("Grade","")
+                tier   = str(sr.get("Tier", "C"))
                 expl   = explain_signal(sig, sr.get("Passed",""), sr.get("Blockers",""), sr["BUY%"], grade)
-                stop_s = f"Stop <b>₹{sr['Stop']:,.1f}</b> &nbsp;" if pd.notna(sr.get("Stop")) else ""
-                tgt_s  = f"Target <b>₹{sr['Target']:,.1f}</b>" if pd.notna(sr.get("Target")) else ""
-                pass_s = f"<span style='font-size:0.72rem;color:#64748b'>Gates: {sr['Passed']}</span>" if sr.get("Passed") else ""
+                confs  = str(sr.get("Confs", "0/8"))
+
+                # gate dots
+                try:
+                    _np, _nt = [int(x) for x in confs.split("/")]
+                except Exception:
+                    _np, _nt = 0, 8
+                _gate_dots = (
+                    "".join(["<span class='gate-dot-pass'></span>"] * _np) +
+                    "".join(["<span class='gate-dot-fail'></span>"] * max(0, _nt - _np))
+                )
+
+                # stop / tgt / R:R pills
+                _has_stop = pd.notna(sr.get("Stop"))
+                _has_tgt  = pd.notna(sr.get("Target"))
+                _stop_p   = f"<span class='stop-pill'>⬇ ₹{sr['Stop']:,.0f}</span>" if _has_stop else ""
+                _tgt_p    = f"<span class='tgt-pill'>⬆ ₹{sr['Target']:,.0f}</span>" if _has_tgt else ""
+                _rr_p     = ""
+                if _has_stop and _has_tgt:
+                    _ri, _re = sr["Price"] - sr["Stop"], sr["Target"] - sr["Price"]
+                    if _ri > 0:
+                        _rr_p = f"<span class='rr-pill'>R:R {_re/_ri:.1f}×</span>"
+
+                # risk warnings
                 risk_tags = ""
                 if sr.get("RSI_warn"):
-                    risk_tags += "<span style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ RSI >70 — overbought entry</span>"
+                    risk_tags += ("<span style='font-size:0.7rem;background:rgba(251,191,36,0.12);"
+                                  "color:#FCD34D;border-radius:4px;padding:2px 8px;margin-right:4px'>⚠ RSI &gt;70 — overbought entry</span>")
                 if sr.get("ATR_warn"):
-                    risk_tags += "<span style='font-size:0.7rem;background:#fee2e2;color:#b91c1c;border-radius:4px;padding:1px 7px;margin-right:4px'>⚠ High ATR — stop wider than normal</span>"
+                    risk_tags += ("<span style='font-size:0.7rem;background:rgba(239,68,68,0.10);"
+                                  "color:#FCA5A5;border-radius:4px;padding:2px 8px;margin-right:4px'>⚠ High ATR — stop wider than normal</span>")
                 if sr.get("WeakBUY"):
-                    risk_tags += "<span style='font-size:0.7rem;background:rgba(59,130,246,0.07);color:#64748b;border-radius:4px;padding:1px 7px'>Grade C + RSI>65 + low volume — HOLD is acceptable</span>"
+                    risk_tags += ("<span style='font-size:0.7rem;background:rgba(59,130,246,0.08);"
+                                  "color:#94A3B8;border-radius:4px;padding:2px 8px'>Grade C + RSI&gt;65 + low volume — HOLD acceptable</span>")
                 sideways_note = ""
                 if trend_regime == "SIDEWAYS" and sig == "BUY":
-                    sideways_note = "<div style='font-size:0.7rem;background:#fef9c3;color:#a16207;border-radius:4px;padding:3px 8px;margin-top:4px'>⚠ Sideways regime — lower signal reliability, tighten stop</div>"
+                    sideways_note = ("<div style='font-size:0.7rem;background:rgba(245,158,11,0.08);"
+                                     "color:#FCD34D;border-radius:6px;padding:4px 10px;margin-top:6px'>"
+                                     "⚠ Sideways regime — lower signal reliability, tighten stop</div>")
+
+                tier_labels = {"A": "★ TIER A", "B": "◈ TIER B", "C": "· TIER C"}
+                tier_label  = tier_labels.get(tier, "TIER C")
+                _card_cls   = "signal-hub-card" if sig == "BUY" else ("signal-hub-card-watch" if sig == "WATCH" else "card")
                 st.markdown(f"""
-<div class='card' style='border-left:4px solid {color};margin-bottom:8px;background:{bg}20'>
-  <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>
-    <span class='badge badge-{sig}'>{sig}{' ' + grade if grade else ''}</span>
-    <span style='font-size:0.85rem;color:#CBD5E1'>BUY% <b>{sr['BUY%']}</b> &nbsp; Confs <b>{sr['Confs']}</b> &nbsp; Rank <b>#{sr['Rank']}</b></span>
-    <span style='font-size:0.85rem;color:#CBD5E1'>{stop_s}{tgt_s}</span>
+<div class='{_card_cls}' style='margin-bottom:10px'>
+  <div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px'>
+    <div style='display:flex;align-items:center;gap:8px'>
+      <span class='badge badge-{sig}'>{sig}{" " + grade if grade else ""}</span>
+      <span class='tier-{tier}'>{tier_label}</span>
+    </div>
+    <span style='font-size:0.78rem;color:#64748b'>Rank <b style='color:#CBD5E1'>#{sr["Rank"]}</b></span>
   </div>
-  <div style='font-size:0.78rem;color:#94A3B8;margin-bottom:4px'>{expl}</div>
-  {pass_s}
-  {risk_tags}
+  <div style='margin-bottom:10px'>
+    <div style='display:flex;justify-content:space-between;font-size:0.65rem;color:#64748b;margin-bottom:3px'>
+      <span style='letter-spacing:.5px'>BUY PROBABILITY</span>
+      <span style='color:{color};font-weight:700'>{sr["BUY%"]:.1f}%</span>
+    </div>
+    <div class='prob-track'><div class='prob-fill-{"green" if sig=="BUY" else "amber"}' style='width:{min(int(sr["BUY%"]),100)}%'></div></div>
+  </div>
+  <div style='margin-bottom:10px'>
+    <div style='font-size:0.63rem;color:#475569;letter-spacing:.5px;margin-bottom:5px'>GATES PASSED &nbsp;<b style='color:#CBD5E1'>{confs}</b></div>
+    <div style='display:flex;gap:5px'>{_gate_dots}</div>
+  </div>
+  <div style='display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px'>{_stop_p}{_tgt_p}{_rr_p}</div>
+  <div style='font-size:0.78rem;color:#94A3B8;margin-bottom:6px'>{expl}</div>
+  {f"<div style='display:flex;gap:5px;flex-wrap:wrap;margin-top:4px'>{risk_tags}</div>" if risk_tags else ""}
   {sideways_note}
 </div>""", unsafe_allow_html=True)
 
@@ -1712,11 +1885,14 @@ with tab1:
                     elif col == "Grade":
                         fg = {"A":"#b45309","B":"#4b5563","C":"#6b7280"}.get(row.get("Grade",""),"#94a3b8")
                         styles.append(f"color:{fg};font-weight:700")
+                    elif col == "Tier":
+                        fg = {"A":"#FCD34D","B":"#94A3B8","C":"#475569"}.get(row.get("Tier",""),"#475569")
+                        styles.append(f"color:{fg};font-weight:700")
                     else:
                         styles.append("color:#CBD5E1")
                 return styles
 
-            show_cols = ["Symbol","Price","1D%","Signal","Grade","BUY%","Confs","RSI"]
+            show_cols = ["Symbol","Price","1D%","Signal","Tier","Grade","BUY%","Confs","RSI"]
             fmt = {"Price": "₹{:,.1f}", "1D%": "{:+.2f}%", "BUY%": "{:.1f}"}
             _scan_disp = filtered_df.copy() if not filtered_df.empty else pd.DataFrame(columns=show_cols)
             if "intraday_score" in _scan_disp.columns:
