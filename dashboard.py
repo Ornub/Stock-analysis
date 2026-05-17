@@ -312,6 +312,8 @@ div[data-baseweb="tab-border"]    { display:none !important; }
 .src-MC      { background:rgba(236,72,153,0.15);  color:#F9A8D4; }
 .src-Reuters { background:rgba(245,158,11,0.15);  color:#FCD34D; }
 .src-BS      { background:rgba(139,92,246,0.15);  color:#C4B5FD; }
+.src-Mint    { background:rgba(139,92,246,0.14);  color:#C4B5FD; }
+.src-HBL     { background:rgba(16,185,129,0.14);  color:#6EE7B7; }
 
 /* ── Confidence bar ──────────────────────────────────────────────────── */
 .conf-bar-wrap { background:rgba(255,255,255,0.06); border-radius:99px; height:5px; margin-top:4px; }
@@ -342,6 +344,22 @@ hr { border-color:rgba(59,130,246,0.10) !important; }
 /* ── Pulse animation ─────────────────────────────────────────────────── */
 @keyframes pulse-glow { 0%,100%{opacity:1} 50%{opacity:0.45} }
 .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#10B981; box-shadow:0 0 8px #10B981; animation:pulse-glow 2s ease-in-out infinite; vertical-align:middle; margin-right:5px; }
+
+/* ── Premium news cards ──────────────────────────────────────────────── */
+.news-card-prem { background:rgba(17,24,39,0.65);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:8px;transition:border-color .2s; }
+.news-card-prem:hover { border-color:var(--border-hi); }
+.sent-bull { display:inline-block;font-size:0.6rem;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(16,185,129,0.12);color:#34D399;border:1px solid rgba(16,185,129,0.28);margin-left:4px;vertical-align:middle; }
+.sent-bear { display:inline-block;font-size:0.6rem;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(239,68,68,0.12);color:#FCA5A5;border:1px solid rgba(239,68,68,0.28);margin-left:4px;vertical-align:middle; }
+.sent-neut { display:inline-block;font-size:0.6rem;font-weight:700;padding:1px 6px;border-radius:4px;background:rgba(100,116,139,0.12);color:#94A3B8;border:1px solid rgba(100,116,139,0.22);margin-left:4px;vertical-align:middle; }
+
+/* ── Historical insight mini-card ────────────────────────────────────── */
+.insight-card { background:linear-gradient(145deg,rgba(59,130,246,0.06),rgba(17,24,39,0.85));border:1px solid rgba(59,130,246,0.20);border-radius:12px;padding:12px 16px;text-align:center;transition:border-color .2s; }
+.insight-card:hover { border-color:rgba(59,130,246,0.40); }
+
+/* ── Footnote / disclaimer box ───────────────────────────────────────── */
+.footnote-box { background:rgba(239,68,68,0.04);border:1px solid rgba(239,68,68,0.16);border-left:3px solid rgba(239,68,68,0.55);border-radius:10px;padding:12px 16px;margin-top:12px;font-size:0.74rem;color:#94A3B8;line-height:1.65; }
+.footnote-box b { color:#FCA5A5; }
+.footnote-box h5 { color:#CBD5E1;font-size:0.78rem;margin:8px 0 4px; }
 
 /* ── Scrollbar ───────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width:5px; height:5px; }
@@ -664,7 +682,24 @@ NEWS_FEEDS = [
         "cls":  "Reuters",
         "url":  "https://feeds.reuters.com/reuters/INbusinessNews",
     },
+    {
+        "name": "Livemint",
+        "cls":  "Mint",
+        "url":  "https://www.livemint.com/rss/markets",
+    },
+    {
+        "name": "Hindu Business",
+        "cls":  "HBL",
+        "url":  "https://www.thehindubusinessline.com/markets/?service=rss",
+    },
 ]
+
+# Sentiment keyword sets for tagging news articles
+_BULL_WORDS = {"rally", "surge", "jump", "gain", "high", "record", "beat", "outperform",
+               "bull", "boom", "rise", "positive", "upgrade", "profit", "growth", "breakout"}
+_BEAR_WORDS = {"fall", "drop", "crash", "loss", "sell-off", "selloff", "bear", "decline",
+               "weak", "miss", "downgrade", "recession", "risk", "cut", "worry", "fear",
+               "plunge", "tumble", "slump", "disappoints", "warning"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -845,10 +880,10 @@ def run_scan() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_news(max_per_feed: int = 3) -> list[dict]:
-    """Fetch headlines from RSS feeds, sorted newest-first, max 7 days old."""
-    import html
-    articles = []
+def fetch_news(max_per_feed: int = 4) -> list[dict]:
+    """Fetch headlines from RSS feeds with sentiment tagging. Newest-first, max 7 days old."""
+    import html as html_mod
+    articles: list[dict] = []
     cutoff = datetime.now() - timedelta(days=7)
 
     _pub_fmts = [
@@ -856,59 +891,140 @@ def fetch_news(max_per_feed: int = 3) -> list[dict]:
         "%a, %d %b %Y %H:%M:%S %Z",
         "%a, %d %b %Y %H:%M:%S",
         "%a, %d %b %Y %H:%M",
+        "%d %b %Y %H:%M:%S %z",
     ]
+
+    def _sentiment(title: str) -> str:
+        words = set(title.lower().split())
+        bull  = len(words & _BULL_WORDS)
+        bear  = len(words & _BEAR_WORDS)
+        if bull > bear:  return "bull"
+        if bear > bull:  return "bear"
+        return "neut"
 
     for feed in NEWS_FEEDS:
         try:
-            resp = requests.get(feed["url"], timeout=6,
-                                headers={"User-Agent": "Mozilla/5.0"})
+            resp = requests.get(feed["url"], timeout=7,
+                                headers={"User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"})
             if resp.status_code != 200:
                 continue
-            root = ET.fromstring(resp.content)
+            root  = ET.fromstring(resp.content)
             items = root.findall(".//item")
             count = 0
             for item in items:
                 if count >= max_per_feed:
                     break
-                title = html.unescape((item.findtext("title") or "").strip())
+                title = html_mod.unescape((item.findtext("title") or "").strip())
                 link  = (item.findtext("link") or "").strip()
                 pub   = (item.findtext("pubDate") or "").strip()
+                desc_raw = html_mod.unescape((item.findtext("description") or "").strip())
+                # strip HTML tags from description
+                import re as _re
+                desc = _re.sub(r"<[^>]+>", "", desc_raw)[:200]
                 if not title or not link:
                     continue
 
-                # parse publish date
                 pub_dt = None
                 for fmt in _pub_fmts:
                     try:
-                        pub_dt = datetime.strptime(pub[:31].strip(), fmt)
-                        pub_dt = pub_dt.replace(tzinfo=None)
+                        pub_dt = datetime.strptime(pub[:31].strip(), fmt).replace(tzinfo=None)
                         break
                     except Exception:
                         continue
 
-                # skip articles older than 7 days
                 if pub_dt and pub_dt < cutoff:
                     continue
 
-                pub_fmt = pub_dt.strftime("%d %b %H:%M") if pub_dt else "recent"
                 articles.append({
-                    "title":  title[:120],
-                    "link":   link,
-                    "source": feed["name"],
-                    "cls":    feed["cls"],
-                    "pub":    pub_fmt,
-                    "pub_dt": pub_dt or datetime.min,
+                    "title":     title[:130],
+                    "desc":      desc.strip() or "",
+                    "link":      link,
+                    "source":    feed["name"],
+                    "cls":       feed["cls"],
+                    "pub":       pub_dt.strftime("%d %b %H:%M") if pub_dt else "recent",
+                    "pub_dt":    pub_dt or datetime.min,
+                    "sentiment": _sentiment(title),
                 })
                 count += 1
         except Exception:
             continue
 
-    # sort all articles newest-first
     articles.sort(key=lambda a: a["pub_dt"], reverse=True)
-    # remove internal sort key before returning
     for a in articles:
         a.pop("pub_dt", None)
     return articles
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_nifty_insights() -> dict:
+    """Return historical Nifty 50 stats: YTD, 1Y, 3Y returns, monthly seasonality, yearly table."""
+    try:
+        today     = date.today()
+        from_date = today - timedelta(days=365 * 8)
+        nifty_raw = fetch_historical_data("^NSEI", from_date, today)
+        if nifty_raw is None or len(nifty_raw) < 100:
+            return {}
+
+        nifty = nifty_raw.copy()
+        nifty["date"] = pd.to_datetime(nifty["DateTime"])
+        nifty = nifty.sort_values("date").set_index("date")
+        close = nifty["Close"]
+
+        def _ret(days: int) -> float:
+            sub = close[close.index >= str(today - timedelta(days=days))]
+            return round((close.iloc[-1] / sub.iloc[0] - 1) * 100, 1) if len(sub) > 1 else 0.0
+
+        ytd_start = close[close.index.year == today.year]
+        ytd_ret   = round((close.iloc[-1] / ytd_start.iloc[0] - 1) * 100, 1) if len(ytd_start) > 1 else 0.0
+
+        # Monthly seasonality — avg % return per calendar month across all years
+        monthly     = close.resample("ME").last()
+        monthly_ret = monthly.pct_change() * 100
+        seasonality = (
+            monthly_ret.groupby(monthly_ret.index.month).mean().round(2).to_dict()
+        )
+
+        # Yearly calendar returns
+        yearly     = close.resample("YE").last()
+        yearly_ret = yearly.pct_change() * 100
+        yearly_data = [
+            {"year": int(yr.year), "ret": round(float(ret), 1)}
+            for yr, ret in yearly_ret.tail(8).items()
+            if not np.isnan(ret)
+        ]
+
+        # 52-week high/low positioning
+        last_252 = close.tail(252)
+        high52   = float(last_252.max())
+        low52    = float(last_252.min())
+        cur_p    = float(close.iloc[-1])
+
+        month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
+                       7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+        best_m  = max(seasonality, key=seasonality.get)
+        worst_m = min(seasonality, key=seasonality.get)
+
+        return {
+            "ytd_ret":    ytd_ret,
+            "one_y_ret":  _ret(365),
+            "three_y_ret":_ret(365*3),
+            "five_y_ret": _ret(365*5),
+            "seasonality":seasonality,
+            "cur_month":  today.month,
+            "high52":     round(high52, 0),
+            "low52":      round(low52, 0),
+            "pct_from_hi":round((cur_p / high52 - 1) * 100, 1),
+            "pct_from_lo":round((cur_p / low52  - 1) * 100, 1),
+            "yearly_data":yearly_data,
+            "best_month": month_names.get(best_m, "?"),
+            "best_ret":   seasonality[best_m],
+            "worst_month":month_names.get(worst_m, "?"),
+            "worst_ret":  seasonality[worst_m],
+            "cur_price":  round(cur_p, 0),
+            "month_names":month_names,
+        }
+    except Exception:
+        return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
