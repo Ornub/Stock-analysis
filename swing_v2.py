@@ -743,9 +743,44 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
         print("⚠  Accuracy near coin-flip — consider retraining with more data or "
               "adjusting FORWARD_DAYS / THRESHOLD.")
 
-    n_final  = max(int(np.median(fold_iters)) if fold_iters else 100, 50)
-    final    = XGBClassifier(n_estimators=n_final, **XGB_BASE)
-    final.fit(X, y, verbose=False)
+    # --- OOT split: hold out last 30 trading days ---
+    all_dates    = pd.to_datetime(panel["DateTime"]).dt.date.values
+    unique_dates = np.sort(np.unique(all_dates))
+    oot_cutoff   = unique_dates[-30] if len(unique_dates) >= 30 else unique_dates[0]
+    oot_mask     = all_dates >= oot_cutoff
+
+    X_train_final = X[~oot_mask]
+    y_train_final = y[~oot_mask]
+    X_oot         = X[oot_mask]
+    y_oot         = y[oot_mask]
+
+    print(f"\nOOT holdout : {oot_mask.sum():,} samples  "
+          f"[{unique_dates[-30]} → {unique_dates[-1]}]")
+    print(f"Final train : {(~oot_mask).sum():,} samples  "
+          f"[{unique_dates[0]} → {unique_dates[-31]}]")
+
+    n_final = max(int(np.median(fold_iters)) if fold_iters else 100, 50)
+    final   = XGBClassifier(n_estimators=n_final, **XGB_BASE)
+    final.fit(X_train_final, y_train_final, verbose=False)
+
+    # Honest OOT evaluation
+    oot_acc = oot_prec = oot_rec = float("nan")
+    if len(X_oot) > 0:
+        y_oot_pred = final.predict(X_oot)
+        y_oot_prob = final.predict_proba(X_oot)[:, 1]
+        oot_acc  = accuracy_score(y_oot, y_oot_pred)
+        oot_prec = precision_score(y_oot, y_oot_pred, pos_label=1, zero_division=0)
+        oot_rec  = recall_score(y_oot, y_oot_pred, pos_label=1, zero_division=0)
+        print(f"\nOOT test (last 30 trading days, n={len(X_oot):,}):")
+        print(f"  Accuracy      : {oot_acc:.3f}")
+        print(f"  BUY precision : {oot_prec:.3f}")
+        print(f"  BUY recall    : {oot_rec:.3f}")
+        print("\nOOT probability calibration:")
+        for p in (0.50, 0.55, 0.60, 0.62, 0.65, 0.70):
+            pmask = y_oot_prob >= p
+            n     = int(pmask.sum())
+            hit   = float(y_oot[pmask].mean()) if n > 0 else 0.0
+            print(f"  prob ≥ {p:.2f}: {n:>5,} samples  empirical BUY rate = {hit*100:5.1f}%")
 
     MODEL_DIR.mkdir(exist_ok=True)
     joblib.dump({
@@ -755,7 +790,10 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
         "val_std":    std_acc,
         "val_prec":   mean_prec,
         "val_rec":    mean_rec,
-        "n_train":    len(panel),
+        "oot_acc":    oot_acc,
+        "oot_prec":   oot_prec,
+        "oot_rec":    oot_rec,
+        "n_train":    int((~oot_mask).sum()),
         "trained_on": symbols,
         "trained_at": str(date.today()),
     }, MODEL_PATH)
@@ -765,20 +803,14 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     print(f"Total panel rows  : {total_rows:,}")
     print(f"Labelled samples  : {len(panel):,}")
     print(f"Class balance     : BUY {n_buy/len(panel)*100:.1f}%  SELL {n_sell/len(panel)*100:.1f}%")
-    print(f"Features          : {len(FEATURE_COLS)}  (28 including 4 v3.0 additions)")
+    print(f"Features          : {len(FEATURE_COLS)}")
     print(f"Final trees       : {n_final}")
+    print(f"CV accuracy       : {mean_acc:.3f}  (±{std_acc:.3f})")
+    print(f"OOT accuracy      : {oot_acc:.3f}")
 
     imp = pd.Series(final.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
     print("\nTop 10 feature importances:")
     print(imp.head(10).round(3).to_string())
-
-    all_probs = final.predict_proba(X)[:, 1]
-    print("\nProbability distribution (in-sample calibration check):")
-    for p in (0.50, 0.55, 0.60, 0.62, 0.65, 0.70):
-        mask = all_probs >= p
-        n    = int(mask.sum())
-        hit  = float(y[mask].mean()) if n > 0 else 0.0
-        print(f"  prob ≥ {p:.2f}: {n:>5,} samples  empirical BUY rate = {hit*100:5.1f}%")
 
     return final
 
