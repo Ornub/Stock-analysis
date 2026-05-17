@@ -2,7 +2,7 @@
 swing_v2.py — Institutional-grade NSE swing trading model (v3.1).
 
 Architecture v3.0 upgrades over v2.3:
-  1. Market regime filter — Nifty 50/200 DMA + VIX: long entries only in BULL/SIDEWAYS
+  1. Market regime filter — Nifty 50/200 DMA + VIX: long entries only in BULL regime
   2. Cross-sectional ranking — RS20, MOM60, volume expansion, breakout proximity
   3. 7-gate strict entry confirmation — EMA20/50/200, ADX, MACD, breakout, volume
   4. ML meta-filter — configurable probability threshold + min confirmations
@@ -29,7 +29,7 @@ Commands:
 Default hyperparameters (all configurable at top of file):
     BUY_PROBA = 0.62        MIN_CONFIRMATIONS = 5 / 7
     REGIME_BULL_ONLY = True  TOP_N_CANDIDATES = 20
-    ATR_STOP = 1.5×          ATR_TRAIL = 2.0×   ATR_TARGET = 3.0×
+    ATR_STOP = 1.8×          ATR_TRAIL = 2.0×   ATR_TARGET = 3.0×
     MAX_OPEN_POSITIONS = 5   EMBARGO_SIZE = 10 days
 
 ⚠️ Educational only — not financial advice.
@@ -229,7 +229,7 @@ EMBARGO_SIZE   = 10     # trading days purged between train/test in purged CV
 # Reasoning: institutional desks only open longs when broad market trend is
 # supportive. Nifty 50/200 DMA golden/death cross is the most durable regime
 # signal; VIX overlays the fear level.
-REGIME_BULL_ONLY   = True    # block new longs in BEAR regime
+REGIME_BULL_ONLY   = True    # block new longs in BEAR and SIDEWAYS regimes
 NIFTY_FAST_DMA     = 50      # EMA period for fast DMA
 NIFTY_SLOW_DMA     = 200     # SMA period for slow DMA
 VIX_HIGH_THRESHOLD = 20.0    # above: high volatility → tighten gates
@@ -272,7 +272,7 @@ USE_EVENT_FILTER       = True
 EARNINGS_BLACKOUT_DAYS = 3   # block entry within N days of detected earnings news
 
 # ── Risk management ─────────────────────────────────────────────────────────
-ATR_STOP_MULT      = 1.5   # initial stop: entry - 1.5 × ATR
+ATR_STOP_MULT      = 1.8   # initial stop: entry - 1.8 × ATR  (widened from 1.5 — 48% stop-outs)
 ATR_TRAIL_MULT     = 2.0   # trailing stop: running_high - 2.0 × ATR (wider = breathes more)
 ATR_TARGET_MULT    = 3.0   # target: entry + 3.0 × ATR (1:2 R:R)
 MAX_HOLDING_DAYS   = 10    # time stop after N bars
@@ -967,7 +967,7 @@ def predict(symbols: list[str] | None = None):
     print(f"Nifty: {nifty_close:>8.0f}  |  50DMA: {nifty_50dma:>8.0f}  "
           f"|  200DMA: {nifty_200dma:>8.0f}  |  VIX: {vix_raw:.1f}")
 
-    regime_blocked = REGIME_BULL_ONLY and trend_regime == "BEAR"
+    regime_blocked = REGIME_BULL_ONLY and trend_regime in ("BEAR", "SIDEWAYS")
     vix_extreme    = vol_regime == "EXTREME"
 
     if regime_blocked:
