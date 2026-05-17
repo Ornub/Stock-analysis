@@ -61,60 +61,38 @@ DIR_THRESHOLD  = 0.62
 HOLD_THRESHOLD = 0.55
 
 FEATURE_COLS = [
-    # ── Theory 1: ORB ─────────────────────────────────────────────────
-    "orb_signal", "morning_range_pos",
-    # ── Theory 2: VWAP ────────────────────────────────────────────────
-    "vwap_pct", "vwap_dev_norm",
-    # ── Theory 3: Supertrend ──────────────────────────────────────────
-    "supertrend_sig",
-    # ── Theory 4: CPR ─────────────────────────────────────────────────
-    "cpr_pos",
-    # ── Theory 5: EMA cross ───────────────────────────────────────────
-    "ema9_21_sig", "ema21_50_sig",
-    # ── Theory 6: Bollinger ───────────────────────────────────────────
-    "bb_pct_b", "bb_squeeze", "bb_width",
-    # ── Theory 7: RSI + MACD ──────────────────────────────────────────
-    "rsi", "rsi_zone", "macd_hist_norm", "macd_cross",
-    # ── Theory 8: Market Microstructure ───────────────────────────────
-    "buy_pressure", "upper_wick_pct", "lower_wick_pct",
-    # ── Theory 9: ATR-normalized bar quality ──────────────────────────
-    "bar_atr_ratio", "ret_1bar_atr", "ret_3bar", "ret_6bar",
-    # ── Theory 10: Gap dynamics + prev-day levels ─────────────────────
-    "gap_pct", "above_pd_high", "dist_pd_high",
-    # ── Theory 11: Stochastic ─────────────────────────────────────────
-    "stoch_k", "stoch_d",
-    # ── Theory 12: Heikin-Ashi ────────────────────────────────────────
-    "ha_color", "ha_streak",
-    # ── Theory 13: Time-of-day (is_first_30min dropped: 0 importance) ─
-    "is_power_hour", "time_sin", "time_cos",
-    # ── Theory 14: Volume acceleration ───────────────────────────────
-    "vol_ratio", "vol_accel",
-    # ── Theory 15: Candlestick patterns ──────────────────────────────
-    "engulfing", "inside_bar", "bar_body_pct",
-    # ── Theory 16: Money Flow Index ───────────────────────────────────
-    "mfi",
-    # ── Theory 17: ADX + Directional Movement ────────────────────────
-    "adx_norm", "plus_di_norm",
-    # ── Theory 18: OBV trend ─────────────────────────────────────────
-    "obv_trend",
-    # ── Theory 19: Chaikin Money Flow ────────────────────────────────
-    "cmf",
-    # ── Theory 20: Fast RSI ──────────────────────────────────────────
-    "rsi_5",
-    # ── Session + streak ─────────────────────────────────────────────
-    "session_pct", "consec_dir",
-    # ── Theory 21: Market-regime (Nifty 50 index context) ────────────
-    "nifty_ret_1bar", "nifty_ret_6bar", "nifty_rsi",
-    "rel_strength_1bar", "rel_strength_6bar",
-    # ── Theory 22: Intraday position (session high/low distance) ─────
+    # ── Time & session context (non-lagging) ──────────────────────────
+    "is_power_hour", "time_sin", "time_cos", "session_pct",
     "session_high_dist", "session_low_dist",
-    # ── Theory 23: Opening drive (first-3-bar momentum) ──────────────
+    # ── Opening dynamics ─────────────────────────────────────────────
+    "gap_pct", "gap_atr_norm",         # gap size + gap vs volatility
+    "orb_signal", "morning_range_pos", # opening range position
     "opening_drive", "opening_drive_vol",
-    # ── Theory 24: Nifty regime (ADX + trend direction) ──────────────
+    "prev_close_pos",                  # where yesterday closed in its range
+    # ── Nifty regime (most important cluster) ────────────────────────
+    "nifty_ret_1bar", "nifty_ret_6bar", "nifty_rsi",
     "nifty_adx", "nifty_ema_sig",
-    # ── Theory 25: Fast 3-bar MACD (non-lagging momentum) ────────────
-    "macd_fast_hist",
+    "rel_strength_1bar", "rel_strength_6bar",
+    # ── Price structure ───────────────────────────────────────────────
+    "vwap_pct", "vwap_dev_norm", "vwap_cross",
+    "cpr_pos", "dist_pd_high", "above_pd_high",
+    # ── Momentum / returns ───────────────────────────────────────────
+    "ret_1bar_atr", "ret_3bar", "ret_6bar",
+    "macd_fast_hist",                  # fast 3/8-bar MACD
+    "rsi_5",                           # fast RSI (5-bar)
+    "bb_pct_b",                        # Bollinger position
+    "ema9_21_sig",                     # fast EMA cross
+    # ── Volume ───────────────────────────────────────────────────────
+    "vol_ratio", "vol_accel",
+    "rvol_tod",                        # volume vs same-time-slot historical avg
+    # ── Bar quality / microstructure ─────────────────────────────────
+    "buy_pressure", "bar_body_pct",
+    "upper_wick_pct", "lower_wick_pct",
 ]
+
+# BUY classification threshold (asymmetric: <0.5 biases toward BUY to counter
+# the model's SELL bias in bearish regimes)
+BUY_CLASS_THRESH = 0.47
 
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
@@ -445,8 +423,17 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     opening_drive_s   = pd.Series(0.0,  index=df.index)
     opening_dvol_s    = pd.Series(1.0,  index=df.index)
 
+    prev_close_pos_s  = pd.Series(0.5,  index=df.index)
+    gap_atr_norm_s    = pd.Series(0.0,  index=df.index)
+    vwap_cross_s      = pd.Series(0.0,  index=df.index)
+    rvol_tod_s        = pd.Series(1.0,  index=df.index)
+
     prev_ohlc: dict = {}
     TOTAL_BARS = 75  # NSE 5-min bars per day
+
+    # Build per-bar-slot average volume for RVOL_TOD
+    unique_dates_sorted = sorted(df["DateTime"].dt.date.unique())
+    _bar_vol_history: dict[int, list[float]] = {}  # slot → list of volumes
 
     for d, grp in df.groupby(date_col):
         idx = grp.index;  n = len(grp)
@@ -460,11 +447,17 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             morning_range_s.loc[idx] = np.clip((cur - orb_l) / rng, 0, 1)
         orb_signal_s.loc[idx] = ((cur > orb_h).astype(float) - (cur < orb_l).astype(float))
 
-        # VWAP deviation
+        # VWAP deviation + fresh VWAP cross signal
         vw  = vwap_all.loc[idx].values
         vws = vwap_std_all.loc[idx].values
         vwap_pct_s.loc[idx]      = np.clip((cur / np.where(vw > 0, vw, np.nan) - 1) * 100, -5, 5)
         vwap_dev_norm_s.loc[idx] = np.clip((cur - vw) / np.where(vws > 0, vws, np.nan), -4, 4)
+        # vwap_cross: +1 when price just crossed above VWAP, -1 when just crossed below
+        prev_close_vals = grp["Close"].shift(1).values
+        prev_vw = np.roll(vw, 1); prev_vw[0] = vw[0]
+        crossed_up   = (prev_close_vals <= prev_vw) & (cur > vw)
+        crossed_down = (prev_close_vals >= prev_vw) & (cur < vw)
+        vwap_cross_s.loc[idx] = (crossed_up.astype(float) - crossed_down.astype(float))
 
         # CPR + gap + prev-day levels
         if prev_ohlc:
@@ -477,6 +470,16 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             gap_pct_s.loc[idx]       = np.clip(gap, -5, 5)
             above_pd_high_s.loc[idx] = ((cur > ph).astype(float) - (cur < pl).astype(float))
             dist_pd_high_s.loc[idx]  = np.clip((cur / ph - 1) * 100 if ph > 0 else 0, -5, 5)
+            # gap_atr_norm: gap size relative to current ATR
+            day_atr_mean = atr14.loc[idx].mean()
+            day_close_mean = grp["Close"].mean()
+            if day_atr_mean > 0 and day_close_mean > 0:
+                atr_pct = day_atr_mean / day_close_mean * 100
+                gap_atr_norm_s.loc[idx] = float(np.clip(gap / atr_pct if atr_pct > 0 else 0, -5, 5))
+            # prev_close_pos: where did yesterday close in its range? 0=low, 1=high
+            prev_range = ph - pl
+            if prev_range > 0:
+                prev_close_pos_s.loc[idx] = float(np.clip((pc - pl) / prev_range, 0, 1))
 
         # Time-of-day
         bar_nums = np.arange(n)
@@ -486,7 +489,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         time_cos_s.loc[idx] = np.cos(angle)
         session_pct_s.loc[idx] = bar_nums / max(n - 1, 1)
 
-        # Theory 22: Session high/low distance (non-lagging real-time position)
+        # Session high/low distance (non-lagging real-time position)
         sess_h = grp["High"].expanding().max().values
         sess_l = grp["Low"].expanding().min().values
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -495,7 +498,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             session_lo_dist_s.loc[idx] = np.clip(
                 np.where(sess_l > 0, (cur / sess_l - 1) * 100, 0), 0, 5)
 
-        # Theory 23: Opening drive — first 3-bar direction × ATR-normalized magnitude
+        # Opening drive — first 3-bar direction × ATR-normalized magnitude
         atr14_day = atr14.loc[idx].values
         first3_h  = grp["High"].iloc[:min(3, n)].max()
         first3_l  = grp["Low"].iloc[:min(3, n)].min()
@@ -512,24 +515,40 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         opening_dvol_s.loc[idx] = float(np.clip(
             first3_vol / avg_vol if avg_vol > 0 else 1.0, 0, 5))
 
+        # RVOL_TOD: volume at each bar slot vs historical average for that slot
+        vols = grp["Volume"].values
+        rvol_vals = np.ones(n)
+        for slot in range(n):
+            hist = _bar_vol_history.get(slot, [])
+            if len(hist) >= 3:
+                avg_slot_vol = np.mean(hist[-20:])  # rolling 20-day avg for slot
+                if avg_slot_vol > 0:
+                    rvol_vals[slot] = np.clip(vols[slot] / avg_slot_vol, 0, 10)
+            _bar_vol_history.setdefault(slot, []).append(float(vols[slot]))
+        rvol_tod_s.loc[idx] = rvol_vals
+
         prev_ohlc[d] = (grp["High"].max(), grp["Low"].min(), grp["Close"].iloc[-1])
 
     out["orb_signal"]        = orb_signal_s
     out["morning_range_pos"] = morning_range_s
     out["vwap_pct"]          = vwap_pct_s
     out["vwap_dev_norm"]     = vwap_dev_norm_s.fillna(0)
+    out["vwap_cross"]        = vwap_cross_s
     out["cpr_pos"]           = cpr_pos_s
     out["session_pct"]       = session_pct_s
     out["gap_pct"]           = gap_pct_s
+    out["gap_atr_norm"]      = gap_atr_norm_s
+    out["prev_close_pos"]    = prev_close_pos_s
     out["above_pd_high"]     = above_pd_high_s
     out["dist_pd_high"]      = dist_pd_high_s
-    out["is_power_hour"]      = is_power_hr_s
-    out["time_sin"]           = time_sin_s
-    out["time_cos"]           = time_cos_s
-    out["session_high_dist"]  = session_hi_dist_s
-    out["session_low_dist"]   = session_lo_dist_s
-    out["opening_drive"]      = opening_drive_s
-    out["opening_drive_vol"]  = opening_dvol_s
+    out["is_power_hour"]     = is_power_hr_s
+    out["time_sin"]          = time_sin_s
+    out["time_cos"]          = time_cos_s
+    out["session_high_dist"] = session_hi_dist_s
+    out["session_low_dist"]  = session_lo_dist_s
+    out["opening_drive"]     = opening_drive_s
+    out["opening_drive_vol"] = opening_dvol_s
+    out["rvol_tod"]          = rvol_tod_s
 
     # ── Theory 21: Nifty 50 market-regime features ───────────────────
     nifty_df = fetch_nifty_5min(days=60)
@@ -624,7 +643,7 @@ def _eval_two_stage(X: pd.DataFrame, y_raw: pd.Series,
     X_bs      = X[bs_mask]
     y_bs      = (y_raw[bs_mask] == 1).astype(int)
     dir_proba = _dir_proba_ensemble(model_dir, X_bs)
-    dir_pred  = (dir_proba >= 0.5).astype(int)
+    dir_pred  = (dir_proba >= BUY_CLASS_THRESH).astype(int)  # asymmetric: bias toward BUY
     dir_acc   = float(np.mean(dir_pred == y_bs.values))
 
     buy_mask  = y_bs == 1
@@ -795,6 +814,12 @@ def train(symbols: list[str] | None = None, days: int = 58,
     # No separate OOT — the 30% val IS the honest held-out test
     X_oot = X_val;  y_oot = y_val
 
+    # Time-decay sample weights: newer bars matter more (half-life = 15 trading days)
+    # Each symbol contributes equal-length train slices, so position ∝ recency
+    n_tr   = len(X_all)
+    decay  = np.exp(np.linspace(-np.log(3), 0, n_tr))   # oldest=1/3x, newest=1x
+    _w_time = decay / decay.mean()                        # normalised to mean=1
+
     n_buy  = (y_all == 1).sum();  n_sell = (y_all == -1).sum()
     n_hold = (y_all == 0).sum()
     print(f"\nTrain: {len(X_all):,} bars  "
@@ -835,10 +860,13 @@ def train(symbols: list[str] | None = None, days: int = 58,
     X_bs        = X_tr[bs_mask]
     y_bs        = (y_tr[bs_mask] == 1).astype(int)   # 1=BUY, 0=SELL
 
-    # Balanced BUY/SELL weights for direction model
+    # Balanced BUY/SELL weights × time-decay (recent bars 3x more important)
     n_b = (y_bs == 1).sum(); n_s = (y_bs == 0).sum()
-    w_dir = y_bs.apply(lambda v: (n_b + n_s) / (2 * n_b) if v == 1
+    w_cls = y_bs.apply(lambda v: (n_b + n_s) / (2 * n_b) if v == 1
                        else (n_b + n_s) / (2 * n_s)).values
+    w_decay_bs = _w_time[bs_mask.values]
+    w_dir = w_cls * w_decay_bs
+    w_dir = w_dir / w_dir.mean()
 
     bs_val  = y_val.isin([1, -1])
     X_bs_v  = X_val[bs_val]
@@ -878,13 +906,13 @@ def train(symbols: list[str] | None = None, days: int = 58,
               eval_set=[(X_bs_v, y_bs_v)], verbose=False)
         models_dir.append(m)
         ens_dir_p = _dir_proba_ensemble(models_dir, X_bs_v)
-        ens_acc   = float(np.mean((ens_dir_p >= 0.5).astype(int) == y_bs_v.values))
+        ens_acc   = float(np.mean((ens_dir_p >= BUY_CLASS_THRESH).astype(int) == y_bs_v.values))
         print(f"  iter={m.best_iteration:4d}  "
               f"ensemble val dir={ens_acc*100:.1f}%")
 
     # Final ensemble accuracy report
     ens_dir_p = _dir_proba_ensemble(models_dir, X_bs_v)
-    ens_pred  = (ens_dir_p >= 0.5).astype(int)
+    ens_pred  = (ens_dir_p >= BUY_CLASS_THRESH).astype(int)
     dir_acc   = float(np.mean(ens_pred == y_bs_v.values))
     buy_acc   = float(np.mean(ens_pred[y_bs_v == 1] == 1)) if (y_bs_v == 1).any() else 0.0
     sell_acc  = float(np.mean(ens_pred[y_bs_v == 0] == 0)) if (y_bs_v == 0).any() else 0.0
@@ -904,10 +932,12 @@ def train(symbols: list[str] | None = None, days: int = 58,
     y_nh_tr = (y_tr != 0).astype(int)   # 1=non-HOLD, 0=HOLD
     y_nh_v  = (y_val != 0).astype(int)
 
-    # Upweight non-HOLD bars (they're the minority and the interesting case)
+    # Upweight non-HOLD bars × time-decay
     n_nh  = (y_nh_tr == 1).sum(); n_h = (y_nh_tr == 0).sum()
-    w_hold = y_nh_tr.apply(lambda v: (n_nh + n_h) / (2 * n_nh) if v == 1
-                            else (n_nh + n_h) / (2 * n_h) * 0.8).values
+    w_cls_hold = y_nh_tr.apply(lambda v: (n_nh + n_h) / (2 * n_nh) if v == 1
+                                else (n_nh + n_h) / (2 * n_h) * 0.8).values
+    w_hold = w_cls_hold * _w_time
+    w_hold = w_hold / w_hold.mean()
 
     model_hold = XGBClassifier(
         n_estimators=900,
