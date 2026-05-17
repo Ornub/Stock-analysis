@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CTC vs Reality — The 3-Player Wealth Story</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --p1: #22c55e; --p2: #3b82f6; --p3: #f59e0b;
+    --bg: #0f172a; --card: #1e293b; --border: #334155;
+    --text: #f1f5f9; --muted: #94a3b8; --accent: #6366f1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.6; }
+
+  /* Hero */
+  .hero { text-align: center; padding: 72px 24px 48px; background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); border-bottom: 1px solid var(--border); }
+  .hero h1 { font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 800; background: linear-gradient(90deg, #818cf8, #34d399); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--muted); max-width: 640px; margin: 16px auto 0; font-size: 1.1rem; }
+  .badge { display: inline-block; background: #312e81; color: #a5b4fc; padding: 4px 14px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; margin-bottom: 16px; letter-spacing: .05em; }
+
+  /* Layout */
+  .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+  .section { padding: 64px 0 32px; }
+  .section-title { font-size: 1.6rem; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+  .section-title .round-badge { background: var(--accent); color: white; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.9rem; font-weight: 800; flex-shrink: 0; }
+  .section-sub { color: var(--muted); margin-bottom: 32px; max-width: 640px; }
+
+  /* Cards */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 32px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-bottom: 32px; }
+
+  /* Player cards */
+  .player-card { border-top: 4px solid var(--color); }
+  .player-name { font-size: 1.1rem; font-weight: 700; color: var(--color); margin-bottom: 4px; }
+  .player-role { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
+  .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-label { color: var(--muted); font-size: 0.9rem; }
+  .stat-value { font-weight: 700; font-size: 0.95rem; }
+  .strikethrough { text-decoration: line-through; color: #64748b; }
+  .highlight { color: #34d399; }
+  .danger { color: #f87171; }
+  .warn { color: #fbbf24; }
+
+  /* Chart containers */
+  .chart-wrap { position: relative; height: 320px; }
+  .chart-wrap-lg { position: relative; height: 420px; }
+  .chart-wrap-sm { position: relative; height: 260px; }
+
+  /* Insight boxes */
+  .insight { background: #1e1b4b; border-left: 4px solid var(--accent); border-radius: 0 12px 12px 0; padding: 16px 20px; margin: 24px 0; }
+  .insight strong { color: #a5b4fc; }
+  .insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 24px 0; }
+  .insight-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
+  .insight-card .number { font-size: 2rem; font-weight: 800; }
+  .insight-card .label { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+  .insight-card.green .number { color: #34d399; }
+  .insight-card.red .number { color: #f87171; }
+  .insight-card.yellow .number { color: #fbbf24; }
+  .insight-card.blue .number { color: #60a5fa; }
+
+  /* Verdict */
+  .verdict { background: linear-gradient(135deg, #0f172a, #1e1b4b); border: 1px solid #4f46e5; border-radius: 20px; padding: 40px; text-align: center; margin: 48px 0; }
+  .verdict h2 { font-size: 1.8rem; font-weight: 800; margin-bottom: 16px; }
+  .verdict p { color: var(--muted); max-width: 600px; margin: 0 auto 12px; }
+
+  /* Progress bars */
+  .progress-bar { background: #334155; border-radius: 999px; height: 10px; overflow: hidden; margin: 6px 0; }
+  .progress-fill { height: 100%; border-radius: 999px; transition: width 0.6s ease; }
+
+  /* Divider */
+  hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th { background: #1e293b; color: var(--muted); padding: 10px 14px; text-align: left; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: .05em; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .tbl-wrap { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin: 24px 0; }
+
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .tag-green { background: #14532d; color: #4ade80; }
+  .tag-red   { background: #450a0a; color: #f87171; }
+  .tag-yellow{ background: #451a03; color: #fbbf24; }
+
+  footer { text-align: center; padding: 40px 24px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="badge">DATA-VALIDATED · 01 / Zero One Video</div>
+  <h1>CTC vs Reality</h1>
+  <p>Three players. Four rounds. One truth: <strong style="color:#f1f5f9">your salary number is a lie</strong> — what you do with what's left is everything.</p>
+</div>
+
+<div class="container">
+
+  <!-- ── ROUND 1: INCOME ── -->
+  <div class="section">
+    <div class="section-title">
+      <div class="round-badge">1</div>
+      Income Power — CTC vs What You Actually Get
+    </div>
+    <p class="section-sub">The video shows how CTC strips down to in-hand. Two rules: remove one-time payments, remove anything variable. Here's the real math.</p>
+
+    <div class="grid-3">
+      <!-- Harish -->
+      <div class="card player-card" style="--color: var(--p1)">
+        <div class="player-name">Harish — Player 1</div>
+        <div class="player-role">Sales · 25L CTC</div>
+        <div class="stat-row"><span class="stat-label">CTC</span><span class="stat-value">₹25L</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Retention bonus (ifs & buts)</span><span class="stat-value strikethrough">−₹2L</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Variable bonus</span><span class="stat-value strikethrough">−₹2L</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Insurance cover</span><span class="stat-value strikethrough">−₹1L</span></div>
+        <div class="stat-row"><span class="stat-label">Fixed salary payable</span><span class="stat-value">₹14L</span></div>
+        <div class="stat-row"><span class="stat-label">Std deduction + NPS</span><span class="stat-value">−₹1.75L</span></div>
+        <div class="stat-row"><span class="stat-label">Taxable income</span><span class="stat-value">₹12.25L</span></div>
+        <div class="stat-row"><span class="stat-label">Tax paid</span><span class="stat-value danger">−₹2.4L</span></div>
+        <div class="stat-row"><span class="stat-label">Monthly in-hand</span><span class="stat-value highlight" style="font-size:1.1rem">₹95,000</span></div>
+        <div style="margin-top:12px; color:var(--muted); font-size:0.82rem">In-hand = <strong style="color:var(--p1)">46%</strong> of CTC</div>
+      </div>
+      <!-- IT Player -->
+      <div class="card player-card" style="--color: var(--p2)">
+        <div class="player-name">Player 2 — IT Pro</div>
+        <div class="player-role">9yr IT veteran · 40L CTC</div>
+        <div class="stat-row"><span class="stat-label">CTC</span><span class="stat-value">₹40L</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Variable bonus</span><span class="stat-value strikethrough">₹0</span></div>
+        <div class="stat-row"><span class="stat-label">Fixed salary payable</span><span class="stat-value">₹40L</span></div>
+        <div class="stat-row"><span class="stat-label">Std deduction</span><span class="stat-value">−₹0.75L</span></div>
+        <div class="stat-row"><span class="stat-label">Taxable income</span><span class="stat-value">₹39.25L</span></div>
+        <div class="stat-row"><span class="stat-label">Tax paid</span><span class="stat-value danger">−₹10.2L</span></div>
+        <div class="stat-row"><span class="stat-label">Monthly in-hand</span><span class="stat-value highlight" style="font-size:1.1rem">₹2,49,000</span></div>
+        <div style="margin-top:12px; color:var(--muted); font-size:0.82rem">Cleanest CTC. In-hand = <strong style="color:var(--p2)">75%</strong> of CTC</div>
+      </div>
+      <!-- Nikil -->
+      <div class="card player-card" style="--color: var(--p3)">
+        <div class="player-name">Nikil — Player 3</div>
+        <div class="player-role">AI placement · 1Cr CTC</div>
+        <div class="stat-row"><span class="stat-label">CTC headline</span><span class="stat-value">₹1 Cr</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">ESOPs (variable, illiquid)</span><span class="stat-value strikethrough">−₹40L</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Insurance cover</span><span class="stat-value strikethrough">removed</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Performance bonus</span><span class="stat-value strikethrough">removed</span></div>
+        <div class="stat-row"><span class="stat-label strikethrough">Retention + relocation</span><span class="stat-value strikethrough">removed</span></div>
+        <div class="stat-row"><span class="stat-label">Real fixed salary</span><span class="stat-value warn">~₹40L</span></div>
+        <div class="stat-row"><span class="stat-label">Tax paid</span><span class="stat-value danger">−₹9.5L</span></div>
+        <div class="stat-row"><span class="stat-label">Monthly in-hand</span><span class="stat-value highlight" style="font-size:1.1rem">₹2,54,000</span></div>
+        <div style="margin-top:12px; color:var(--muted); font-size:0.82rem">1Cr CTC → same in-hand as 40L guy. <strong style="color:var(--p3)">Headline is a trap.</strong></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="margin-bottom:16px; font-weight:600">CTC vs Actual In-hand (Annual)</div>
+      <div class="chart-wrap">
+        <canvas id="ctcChart"></canvas>
+      </div>
+    </div>
+
+    <div class="insight">
+      <strong>Key Insight:</strong> Nikil's 1Cr CTC and Player 2's 40L CTC produce <em>almost identical monthly in-hand</em> (₹2.54L vs ₹2.49L). The 60L difference exists only on paper — ESOPs, bonuses, insurance that may never materialise. <strong>Never negotiate on CTC. Negotiate on fixed in-hand.</strong>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── ROUND 2: SPENDING ── -->
+  <div class="section">
+    <div class="section-title">
+      <div class="round-badge">2</div>
+      Spending Behaviour — The Real Differentiator
+    </div>
+    <p class="section-sub">Player 2 and Nikil have nearly identical in-hand salaries. But their spending behaviour creates completely different futures.</p>
+
+    <div class="grid-3">
+      <div class="card player-card" style="--color: var(--p1)">
+        <div class="player-name">Harish · ₹95k/month</div>
+        <div class="player-role">Fixed expenses: 32% ✅</div>
+        <div class="stat-row"><span class="stat-label">Rent</span><span class="stat-value">₹22,000</span></div>
+        <div class="stat-row"><span class="stat-label">Bike EMI</span><span class="stat-value">₹9,000</span></div>
+        <div class="stat-row"><span class="stat-label">Total fixed</span><span class="stat-value">₹31,000 (32%)</span></div>
+        <div class="stat-row"><span class="stat-label">Variable (groceries, petrol)</span><span class="stat-value">~₹20,000</span></div>
+        <div class="stat-row"><span class="stat-label">Monthly savings</span><span class="stat-value highlight">~₹44,000 (46%)</span></div>
+        <div style="margin-top:16px">
+          <div style="font-size:0.8rem; color:var(--muted); margin-bottom:4px">Fixed / Variable / Savings</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:32%; background:var(--p1)"></div></div>
+          <div style="font-size:0.75rem; color:var(--muted)">32% fixed — well within the 50% rule</div>
+        </div>
+      </div>
+
+      <div class="card player-card" style="--color: var(--p2)">
+        <div class="player-name">Player 2 · ₹2.49L/month</div>
+        <div class="player-role">Fixed expenses: 71% 🚨</div>
+        <div class="stat-row"><span class="stat-label">Home loan (3Cr house)</span><span class="stat-value danger">~₹1,10,000</span></div>
+        <div class="stat-row"><span class="stat-label">Car loan (Jeep)</span><span class="stat-value danger">~₹40,000</span></div>
+        <div class="stat-row"><span class="stat-label">Personal loan</span><span class="stat-value danger">~₹27,000</span></div>
+        <div class="stat-row"><span class="stat-label">Total fixed</span><span class="stat-value danger">~₹1,77,000 (71%)</span></div>
+        <div class="stat-row"><span class="stat-label">Monthly savings</span><span class="stat-value warn">~₹40,000 (16%)</span></div>
+        <div style="margin-top:16px">
+          <div style="font-size:0.8rem; color:var(--muted); margin-bottom:4px">Fixed commitment</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:71%; background:#f87171"></div></div>
+          <div style="font-size:0.75rem; color:var(--muted)">71% fixed — <strong style="color:#f87171">tethered to job, zero flexibility</strong></div>
+        </div>
+      </div>
+
+      <div class="card player-card" style="--color: var(--p3)">
+        <div class="player-name">Nikil · ₹2.54L/month</div>
+        <div class="player-role">Fixed expenses: ~35% (est.)</div>
+        <div class="stat-row"><span class="stat-label">Rent (metro, premium)</span><span class="stat-value">~₹40,000</span></div>
+        <div class="stat-row"><span class="stat-label">Lifestyle (young, AI job)</span><span class="stat-value warn">~₹50,000</span></div>
+        <div class="stat-row"><span class="stat-label">Estimated fixed</span><span class="stat-value">~₹90,000 (35%)</span></div>
+        <div class="stat-row"><span class="stat-label">Monthly savings</span><span class="stat-value highlight">~₹1,00,000 (39%)</span></div>
+        <div style="margin-top:16px">
+          <div style="font-size:0.8rem; color:var(--muted); margin-bottom:4px">Fixed commitment (estimated)</div>
+          <div class="progress-bar"><div class="progress-fill" style="width:35%; background:var(--p3)"></div></div>
+          <div style="font-size:0.75rem; color:var(--muted)">Good flexibility — but where it goes matters ↓</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="margin-bottom:16px; font-weight:600">Spending vs Savings Breakdown</div>
+      <div class="chart-wrap">
+        <canvas id="spendChart"></canvas>
+      </div>
+    </div>
+
+    <div class="insight">
+      <strong>The Brutal Math:</strong> Player 2 earns <strong>2.6× more</strong> than Harish monthly, but saves only <em>₹40k vs ₹44k</em> — almost the same amount. A 3Cr house and Jeep consumed the entire income advantage. This is the <strong>lifestyle inflation trap</strong> — income rises but savings stay flat.
+    </div>
+
+    <div class="insight-grid">
+      <div class="insight-card green">
+        <div class="number">46%</div>
+        <div class="label">Harish savings rate (₹95k income)</div>
+      </div>
+      <div class="insight-card red">
+        <div class="number">16%</div>
+        <div class="label">Player 2 savings rate (₹2.49L income)</div>
+      </div>
+      <div class="insight-card yellow">
+        <div class="number">39%</div>
+        <div class="label">Nikil savings rate (₹2.54L income)</div>
+      </div>
+      <div class="insight-card blue">
+        <div class="number">50%</div>
+        <div class="label">Rule of thumb: fixed expenses ceiling</div>
+      </div>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── ROUND 3: INVESTMENT ── -->
+  <div class="section">
+    <div class="section-title">
+      <div class="round-badge">3</div>
+      Investment Behaviour — Allocation is Everything
+    </div>
+    <p class="section-sub">Saving money is step 1. Where it goes determines whether it compounds or evaporates.</p>
+
+    <div class="grid-3">
+      <div class="card player-card" style="--color: var(--p1)">
+        <div class="player-name">Harish — Diversified ✅</div>
+        <div class="player-role">Monthly SIP: ~₹44,000</div>
+        <div class="chart-wrap-sm"><canvas id="pie1"></canvas></div>
+        <div style="font-size:0.82rem; color:var(--muted); margin-top:8px">60% MF · 15% Debt · 10% Liquid · 10% RD · 5% Gold</div>
+        <div class="tag tag-green" style="margin-top:8px">Well diversified</div>
+      </div>
+
+      <div class="card player-card" style="--color: var(--p2)">
+        <div class="player-name">Player 2 — Concentrated ⚠️</div>
+        <div class="player-role">Monthly SIP: ~₹40,000</div>
+        <div class="chart-wrap-sm"><canvas id="pie2"></canvas></div>
+        <div style="font-size:0.82rem; color:var(--muted); margin-top:8px">70% MF · 29% FD · 0% Liquid · 0% Gold</div>
+        <div class="tag tag-yellow" style="margin-top:8px">No liquid buffer · No gold hedge</div>
+      </div>
+
+      <div class="card player-card" style="--color: var(--p3)">
+        <div class="player-name">Nikil — High Risk 🚨</div>
+        <div class="player-role">Monthly SIP: ~₹1,00,000</div>
+        <div class="chart-wrap-sm"><canvas id="pie3"></canvas></div>
+        <div style="font-size:0.82rem; color:var(--muted); margin-top:8px">52% Crypto · 30% Cash · 17.5% Index</div>
+        <div class="tag tag-red" style="margin-top:8px">52% in single high-risk asset</div>
+      </div>
+    </div>
+
+    <div class="insight">
+      <strong>The ESOP trap:</strong> Nikil's reasoning — "My ESOPs will be worth millions, so I can afford high crypto risk" — is a textbook error. ESOPs and a single-company job create <em>double concentration risk</em>: if the company underperforms, you lose income AND the ESOP value simultaneously. Your portfolio must compensate for job risk, not amplify it.
+    </div>
+
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Asset class</th><th>Expected return</th><th>Risk level</th><th>Harish</th><th>Player 2</th><th>Nikil</th></tr></thead>
+        <tbody>
+          <tr><td>Equity MF</td><td>11–13% CAGR</td><td><span class="tag tag-yellow">Medium-High</span></td><td>60%</td><td>70%</td><td>17.5%</td></tr>
+          <tr><td>Debt / FD</td><td>6–8%</td><td><span class="tag tag-green">Low</span></td><td>25%</td><td>29%</td><td>0%</td></tr>
+          <tr><td>Gold</td><td>10–12% CAGR (INR, 20yr)</td><td><span class="tag tag-green">Low-Med</span></td><td>5%</td><td>0%</td><td>0%</td></tr>
+          <tr><td>Liquid / RD</td><td>5–7%</td><td><span class="tag tag-green">Low</span></td><td>10%</td><td>0%</td><td>0%</td></tr>
+          <tr><td>Crypto</td><td>Unpredictable</td><td><span class="tag tag-red">Extreme</span></td><td>0%</td><td>0%</td><td>52%</td></tr>
+          <tr><td>Cash savings</td><td>3–4% (savings acc)</td><td><span class="tag tag-green">None</span></td><td>0%</td><td>0%</td><td>30%</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── ROUND 4: WEALTH PROJECTION ── -->
+  <div class="section">
+    <div class="section-title">
+      <div class="round-badge">4</div>
+      20-Year Wealth Projection — The Finish Line
+    </div>
+    <p class="section-sub">Compounding the savings rates and portfolio returns over 20 years. Nikil's crypto allocation creates three very different futures.</p>
+
+    <div class="card" style="margin-bottom:24px">
+      <div style="margin-bottom:16px; font-weight:600">Corpus at year 20 — base scenario</div>
+      <div class="chart-wrap-lg">
+        <canvas id="wealthChart"></canvas>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div style="font-weight:600; margin-bottom:16px">Nikil's 3 Scenarios (crypto impact)</div>
+        <div class="chart-wrap">
+          <canvas id="nikil3Chart"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div style="font-weight:600; margin-bottom:16px">Year 20 Corpus Comparison</div>
+        <div class="chart-wrap">
+          <canvas id="finalChart"></canvas>
+        </div>
+        <div class="tbl-wrap" style="margin-top:16px">
+          <table>
+            <thead><tr><th>Player</th><th>Monthly SIP</th><th>Rate</th><th>20yr corpus</th></tr></thead>
+            <tbody>
+              <tr><td style="color:var(--p1)">Harish</td><td>₹44,600</td><td>12%</td><td class="highlight">₹4.46 Cr</td></tr>
+              <tr><td style="color:var(--p2)">Player 2</td><td>₹40,000</td><td>10.5%</td><td class="warn">₹3.27 Cr</td></tr>
+              <tr><td style="color:var(--p3)">Nikil (bull)</td><td>₹1,00,000</td><td>22%</td><td class="highlight">₹42.9 Cr</td></tr>
+              <tr><td style="color:var(--p3)">Nikil (base)</td><td>₹1,00,000</td><td>10%</td><td class="warn">₹7.66 Cr</td></tr>
+              <tr><td style="color:var(--p3)">Nikil (crash)</td><td>₹1,00,000</td><td>−2%</td><td class="danger">₹1.98 Cr</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="insight">
+      <strong>The Paradox:</strong> In the crypto bear scenario, Nikil ends up with <em>less than Harish</em> (₹1.98Cr vs ₹4.46Cr) — despite saving 2.2× more each month. Meanwhile Harish, earning the lowest salary of the three, builds the most <em>predictable</em> wealth path. This is what risk-adjusted returns actually mean.
+    </div>
+
+    <div class="insight-grid">
+      <div class="insight-card green">
+        <div class="number">₹4.46Cr</div>
+        <div class="label">Harish at yr 20 — ₹44.6k/mo, 12%</div>
+      </div>
+      <div class="insight-card blue">
+        <div class="number">₹3.27Cr</div>
+        <div class="label">Player 2 at yr 20 — despite 2.6× income</div>
+      </div>
+      <div class="insight-card red">
+        <div class="number">₹1.98Cr</div>
+        <div class="label">Nikil (bear) — saves most, earns least</div>
+      </div>
+      <div class="insight-card yellow">
+        <div class="number">46%</div>
+        <div class="label">Savings rate beats salary level every time</div>
+      </div>
+    </div>
+  </div>
+
+  <hr>
+
+  <!-- ── KEY TAKEAWAYS ── -->
+  <div class="section">
+    <div class="section-title" style="margin-bottom:24px">
+      <div class="round-badge" style="background:#059669">✓</div>
+      Data-Validated Takeaways
+    </div>
+
+    <div class="insight-grid">
+      <div class="card">
+        <div style="font-size:1.2rem; margin-bottom:8px">📉 CTC is fiction</div>
+        <div style="color:var(--muted); font-size:0.9rem">A 1Cr CTC can have the same in-hand as a 40L CTC. Strip out variables and one-time payments before comparing offers.</div>
+      </div>
+      <div class="card">
+        <div style="font-size:1.2rem; margin-bottom:8px">🧱 Fixed costs are a cage</div>
+        <div style="color:var(--muted); font-size:0.9rem">Player 2's 71% fixed commitment eliminates financial optionality. Job loss = immediate crisis. Keep fixed costs below 50%.</div>
+      </div>
+      <div class="card">
+        <div style="font-size:1.2rem; margin-bottom:8px">🎯 Allocation > Amount</div>
+        <div style="color:var(--muted); font-size:0.9rem">Nikil saves 2.2× more than Harish but could end up with less. Where money goes matters more than how much goes in.</div>
+      </div>
+      <div class="card">
+        <div style="font-size:1.2rem; margin-bottom:8px">🌀 Diversification is boring & correct</div>
+        <div style="color:var(--muted); font-size:0.9rem">20 years of Indian market data show no single asset wins every decade. Equity led 6/11 rolling decades, Gold led 5. You can't predict which.</div>
+      </div>
+      <div class="card">
+        <div style="font-size:1.2rem; margin-bottom:8px">⚡ Savings rate > Salary</div>
+        <div style="color:var(--muted); font-size:0.9rem">46% savings rate on ₹95k beats 16% on ₹2.49L. The gap compounds massively over 20 years.</div>
+      </div>
+      <div class="card">
+        <div style="font-size:1.2rem; margin-bottom:8px">🧭 Define your own finish line</div>
+        <div style="color:var(--muted); font-size:0.9rem">The video's final message: wealth without a personal definition of enough is a treadmill. Journal. Figure out what you actually want. It costs less than you think.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Verdict -->
+  <div class="verdict">
+    <h2>Who's Actually Winning?</h2>
+    <p>By pure numbers, Harish — the "least successful" player — has the best risk-adjusted wealth trajectory. Player 2 earns the most predictably but is consuming it all. Nikil has the highest ceiling and the lowest floor.</p>
+    <p style="margin-top:12px"><strong style="color:#a5b4fc">The real winner is whoever first stops optimising their CTC and starts optimising their savings rate, allocation, and cost structure.</strong></p>
+  </div>
+
+</div>
+
+<footer>
+  Data sources: Video transcript (01 / Zero One YouTube), validated against NSE Nifty, MCX Gold, USD/INR (yfinance). Projections use SIP compounding — for illustration only. Not financial advice.
+</footer>
+
+<script>
+const p1c = '#22c55e', p2c = '#3b82f6', p3c = '#f59e0b';
+const gridColor = 'rgba(255,255,255,0.06)';
+const baseFont = { family: 'Segoe UI, system-ui, sans-serif', size: 12 };
+
+// ── Chart 1: CTC vs In-hand ──
+new Chart(document.getElementById('ctcChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Harish (25L CTC)', 'Player 2 (40L CTC)', 'Nikil (1Cr CTC)'],
+    datasets: [
+      { label: 'CTC (Annual)', data: [25, 40, 100], backgroundColor: 'rgba(100,116,139,0.4)', borderColor: '#64748b', borderWidth: 1 },
+      { label: 'Taxable Salary', data: [12.25, 39.25, 40], backgroundColor: 'rgba(99,102,241,0.5)', borderColor: '#818cf8', borderWidth: 1 },
+      { label: 'Actual In-hand (Annual)', data: [11.4, 29.9, 30.5], backgroundColor: [p1c+'99', p2c+'99', p3c+'99'], borderColor: [p1c, p2c, p3c], borderWidth: 2 },
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#94a3b8', font: baseFont } } },
+    scales: {
+      x: { ticks: { color: '#94a3b8' }, grid: { color: gridColor } },
+      y: { ticks: { color: '#94a3b8', callback: v => '₹' + v + 'L' }, grid: { color: gridColor }, title: { display: true, text: 'Lakhs ₹', color: '#64748b' } }
+    }
+  }
+});
+
+// ── Chart 2: Spending ──
+new Chart(document.getElementById('spendChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Harish (₹95k)', 'Player 2 (₹2.49L)', 'Nikil (₹2.54L)'],
+    datasets: [
+      { label: 'Fixed expenses %', data: [32, 71, 35], backgroundColor: '#f87171aa', borderColor: '#f87171', borderWidth: 1 },
+      { label: 'Variable expenses %', data: [22, 13, 26], backgroundColor: '#fbbf24aa', borderColor: '#fbbf24', borderWidth: 1 },
+      { label: 'Savings %', data: [46, 16, 39], backgroundColor: '#34d399aa', borderColor: '#34d399', borderWidth: 1 },
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#94a3b8', font: baseFont } } },
+    scales: {
+      x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: gridColor } },
+      y: { stacked: true, max: 100, ticks: { color: '#94a3b8', callback: v => v + '%' }, grid: { color: gridColor } }
+    }
+  }
+});
+
+// ── Pie charts ──
+const pieOpts = (colors) => ({
+  responsive: true, maintainAspectRatio: false,
+  plugins: {
+    legend: { position: 'right', labels: { color: '#94a3b8', font: { size: 10 }, boxWidth: 12, padding: 8 } }
+  }
+});
+
+new Chart(document.getElementById('pie1'), {
+  type: 'doughnut',
+  data: { labels: ['Equity MF', 'Debt Fund', 'Liquid', 'RD', 'Gold'],
+    datasets: [{ data: [60,15,10,10,5], backgroundColor: ['#22c55e','#60a5fa','#a78bfa','#34d399','#fbbf24'], borderWidth: 0 }] },
+  options: pieOpts()
+});
+
+new Chart(document.getElementById('pie2'), {
+  type: 'doughnut',
+  data: { labels: ['Equity MF', 'FD'],
+    datasets: [{ data: [70,29], backgroundColor: ['#3b82f6','#60a5fa'], borderWidth: 0 }] },
+  options: pieOpts()
+});
+
+new Chart(document.getElementById('pie3'), {
+  type: 'doughnut',
+  data: { labels: ['Crypto', 'Cash', 'Index Funds'],
+    datasets: [{ data: [52,30,17.5], backgroundColor: ['#f87171','#94a3b8','#fbbf24'], borderWidth: 0 }] },
+  options: pieOpts()
+});
+
+// ── Wealth projection ──
+const yrs = Array.from({length:20},(_,i)=>i+1);
+const p1w = [5.71,12.15,19.4,27.58,36.79,47.17,58.86,72.04,86.89,103.62,122.48,143.72,167.67,194.64,225.04,259.29,297.89,341.39,390.4,445.62];
+const p2w = [5.08,10.72,16.99,23.94,31.66,40.23,49.75,60.31,72.04,85.06,99.52,115.57,133.39,153.17,175.13,199.51,226.58,256.63,290.0,327.04];
+const p3b = [13.53,30.36,51.28,77.31,109.67,149.91,199.96,262.2,339.61,435.86,555.57,704.44,889.56,1119.79,1406.1,1762.15,2204.93,2755.58,3440.36,4291.95];
+const p3m = [12.67,26.67,42.13,59.21,78.08,98.93,121.96,147.4,175.5,206.55,240.85,278.74,320.6,366.84,417.92,474.36,536.7,605.57,681.65,765.7];
+const p3cr= [11.87,23.51,34.91,46.09,57.05,67.79,78.32,88.63,98.75,108.66,118.38,127.9,137.24,146.39,155.36,164.15,172.77,181.22,189.5,197.61];
+
+new Chart(document.getElementById('wealthChart'), {
+  type: 'line',
+  data: {
+    labels: yrs.map(y => 'Yr '+y),
+    datasets: [
+      { label: 'Harish (12%, ₹44.6k/mo)', data: p1w, borderColor: p1c, backgroundColor: p1c+'22', fill: true, tension: 0.4, pointRadius: 0 },
+      { label: 'Player 2 (10.5%, ₹40k/mo)', data: p2w, borderColor: p2c, backgroundColor: p2c+'22', fill: true, tension: 0.4, pointRadius: 0 },
+      { label: 'Nikil base (10%, ₹1L/mo)', data: p3m, borderColor: p3c, backgroundColor: p3c+'22', fill: false, tension: 0.4, pointRadius: 0, borderDash: [6,3] },
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#94a3b8', font: baseFont } } },
+    scales: {
+      x: { ticks: { color: '#94a3b8', maxTicksLimit: 10 }, grid: { color: gridColor } },
+      y: { ticks: { color: '#94a3b8', callback: v => '₹'+v+'L' }, grid: { color: gridColor } }
+    }
+  }
+});
+
+// ── Nikil 3 scenarios ──
+new Chart(document.getElementById('nikil3Chart'), {
+  type: 'line',
+  data: {
+    labels: yrs.map(y => 'Yr '+y),
+    datasets: [
+      { label: 'Bull (22% — crypto up)', data: p3b, borderColor: '#34d399', fill: false, tension: 0.4, pointRadius: 0 },
+      { label: 'Base (10%)', data: p3m, borderColor: p3c, fill: false, tension: 0.4, pointRadius: 0, borderDash: [6,3] },
+      { label: 'Bear (−2% — crypto crash)', data: p3cr, borderColor: '#f87171', fill: false, tension: 0.4, pointRadius: 0, borderDash: [2,4] },
+      { label: 'Harish for reference', data: p1w, borderColor: p1c, fill: false, tension: 0.4, pointRadius: 0, borderDash: [8,4], borderWidth: 1.5 },
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#94a3b8', font: { size: 10 } } } },
+    scales: {
+      x: { ticks: { color: '#94a3b8', maxTicksLimit: 10 }, grid: { color: gridColor } },
+      y: { ticks: { color: '#94a3b8', callback: v => '₹'+v+'L' }, grid: { color: gridColor } }
+    }
+  }
+});
+
+// ── Final bar ──
+new Chart(document.getElementById('finalChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Harish', 'Player 2', 'Nikil\n(bull)', 'Nikil\n(base)', 'Nikil\n(crash)'],
+    datasets: [{
+      label: 'Corpus at Year 20 (₹L)',
+      data: [445.62, 327.04, 4291.95, 765.7, 197.61],
+      backgroundColor: [p1c+'bb', p2c+'bb', '#34d399bb', p3c+'bb', '#f87171bb'],
+      borderColor:     [p1c, p2c, '#34d399', p3c, '#f87171'],
+      borderWidth: 2
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#94a3b8' }, grid: { color: gridColor } },
+      y: { ticks: { color: '#94a3b8', callback: v => '₹'+v+'L' }, grid: { color: gridColor } }
+    }
+  }
+});
+</script>
+</body>
+</html>
