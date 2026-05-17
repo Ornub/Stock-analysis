@@ -1,5 +1,5 @@
 """
-swing_v2.py — Institutional-grade NSE swing trading model (v3.1).
+swing_v2.py — Institutional-grade NSE swing trading model (v5.0).
 
 Architecture v3.0 upgrades over v2.3:
   1. Market regime filter — Nifty 50/200 DMA + VIX: long entries only in BULL regime
@@ -27,7 +27,7 @@ Commands:
     python swing_v2.py backtest    # backtest with trailing stops + regime breakdown
 
 Default hyperparameters (all configurable at top of file):
-    BUY_PROBA = 0.62        MIN_CONFIRMATIONS = 5 / 7
+    BUY_PROBA = 0.65        MIN_CONFIRMATIONS = 6 / 8
     REGIME_BULL_ONLY = True  TOP_N_CANDIDATES = 20
     ATR_STOP = 1.8×          ATR_TRAIL = 2.0×   ATR_TARGET = 3.0×
     MAX_OPEN_POSITIONS = 5   EMBARGO_SIZE = 10 days
@@ -161,6 +161,16 @@ def _obv_slope(close: pd.Series, vol: pd.Series,
     return fast_ema / slow_ema - 1
 
 
+def _trend_r2(close: pd.Series, window: int = 20) -> pd.Series:
+    """Rolling R² of price vs time — measures trend cleanliness (0=noisy, 1=perfect)."""
+    t = np.arange(window, dtype=float)
+    def _r2(x: np.ndarray) -> float:
+        if np.std(x) < 1e-8:
+            return 0.0
+        return float(np.corrcoef(t[-len(x):], x)[0, 1] ** 2)
+    return close.rolling(window, min_periods=window // 2).apply(_r2, raw=True)
+
+
 # =============================================================================
 # Universe & sector map
 # =============================================================================
@@ -255,15 +265,15 @@ REQUIRE_BREAKOUT = True   # close > 20-day rolling high (price breakout)
 REQUIRE_VOLUME   = True   # volume > N × 20-day average
 VOLUME_THRESHOLD = 1.0    # 1.0 = current volume ≥ 100% of 20d avg
 
-MIN_CONFIRMATIONS = 5   # of 7 gates must pass (raised from 4/6 in v2.3)
-GRADE_A_MIN = 7         # 7/7 confirmations
-GRADE_B_MIN = 6         # 6/7 confirmations
-GRADE_C_MIN = 5         # 5/7 confirmations (minimum for BUY)
+MIN_CONFIRMATIONS = 6   # of 8 gates must pass [v5.0: +1 momentum gate added]
+GRADE_A_MIN = 8         # 8/8 confirmations
+GRADE_B_MIN = 7         # 7/8 confirmations
+GRADE_C_MIN = 6         # 6/8 confirmations (minimum for BUY)
 
 # ── ML meta-filter ──────────────────────────────────────────────────────────
 # Raised from 0.60 to 0.62 for precision. Strong news relaxes to 0.57.
-BUY_PROBA             = 0.62
-BUY_PROBA_STRONG_NEWS = 0.57
+BUY_PROBA             = 0.65   # v5.0: tightened for higher precision
+BUY_PROBA_STRONG_NEWS = 0.60
 SELL_PROBA            = 0.62
 
 # ── Event / news filters ────────────────────────────────────────────────────
@@ -388,6 +398,11 @@ FEATURE_COLS = [
     "feat_nifty_rsi",           # Nifty RSI(14) / 100 — overbought/oversold
     "feat_nifty_trend",         # 50DMA/200DMA − 1: golden/death cross strength
     "feat_nifty_above_200dma",  # +1 bull / −1 bear long-term regime
+    "feat_nifty_return_3d",     # Nifty 3-day momentum — distinguishes rally vs fall [v5.0]
+    # ── Phase 3: momentum quality & volume confirmation  [v5.0] ──────
+    "feat_return_3d",           # stock 3-day return — fast momentum signal
+    "feat_vol_spike",           # volume / 20d-avg (clipped, 0-1) — institutional activity
+    "feat_trend_quality",       # 20-bar price R² — how clean the trend is
 ]
 
 # Auxiliary market-regime columns — joined from the Nifty fetch.
@@ -398,6 +413,7 @@ MARKET_AUX_COLS = [
     "feat_market_volatility_20d",
     "feat_vix_level",
     "feat_vix_change_5d",
+    "feat_nifty_return_3d",
     "feat_relative_return_5d",
     "feat_nifty_rsi",
     "feat_nifty_trend",
@@ -478,6 +494,15 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["feat_candle_pattern"]= _candle_pattern(op, high, low, close)
     df["feat_obv_slope"]     = _obv_slope(close, vol, fast=5, slow=20).clip(-0.5, 0.5)
 
+    # ── Phase 3: momentum quality & volume confirmation  [v5.0] ──────────────
+    # 3-day momentum: critical for distinguishing "still falling" vs "stabilising"
+    df["feat_return_3d"]      = close.pct_change(3).clip(-0.20, 0.20)
+    # Volume spike: institutional activity marker (>2× 20-day avg)
+    vol_avg20 = vol.rolling(20, min_periods=10).mean().replace(0, np.nan)
+    df["feat_vol_spike"]      = (vol / vol_avg20).clip(0, 5) / 5
+    # Trend quality: R² of 20-bar price regression — 1=clean trend, 0=choppy
+    df["feat_trend_quality"]  = _trend_r2(close, window=20).fillna(0.0)
+
     return df
 
 
@@ -534,6 +559,7 @@ def _fetch_market_regime(years: int) -> pd.DataFrame:
     df["feat_nifty_rsi"]          = _rsi(nc, 14).fillna(50) / 100
     df["feat_nifty_trend"]        = (df["nifty_50dma"] / df["nifty_200dma"].replace(0, np.nan) - 1).fillna(0)
     df["feat_nifty_above_200dma"] = ((nc > df["nifty_200dma"]).astype(float) * 2 - 1).fillna(0)
+    df["feat_nifty_return_3d"]    = nc.pct_change(3).fillna(0).clip(-0.10, 0.10)
 
     df = df.reset_index().rename(columns={"Date": "DateTime"})
     df["DateTime"] = pd.to_datetime(df["DateTime"]).dt.tz_localize(None).dt.normalize()
@@ -734,6 +760,7 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     panel = panel.sort_values("DateTime").reset_index(drop=True)
     X = panel[FEATURE_COLS].values
     y = panel["label"].values
+    symbols_arr = panel["symbol"].values   # for per-stock OOF accuracy
 
     # Class-balance weight
     spw = n_sell / max(n_buy, 1)
@@ -755,10 +782,14 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     ptscv = PurgedTimeSeriesSplit(n_splits=5, embargo_size=EMBARGO_SIZE)
     fold_accs, fold_precs, fold_recs, fold_srecs = [], [], [], []
 
+    # OOF arrays for per-stock precision tiers [v5.0]
+    oof_prob = np.full(len(y), -1.0, dtype=float)
+
     for i, (tr, te) in enumerate(ptscv.split(X), 1):
         m = _cv_lgbm(42)
         m.fit(X[tr], y[tr])
-        y_pred  = m.predict(X[te])
+        y_pred          = m.predict(X[te])
+        oof_prob[te]    = m.predict_proba(X[te])[:, 1]  # accumulate OOF proba
         acc     = accuracy_score(y[te], y_pred)
         prec    = precision_score(y[te], y_pred, pos_label=1, zero_division=0)
         rec     = recall_score(y[te], y_pred, pos_label=1, zero_division=0)
@@ -787,6 +818,34 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
     if mean_acc < 0.52:
         print("⚠  Accuracy near coin-flip — consider retraining with more data or "
               "adjusting FORWARD_DAYS / THRESHOLD.")
+
+    # ── Per-stock OOF BUY precision → stock tier assignment  [v5.0] ─────────
+    # Tier is computed on prob ≥ BUY_PROBA bars only (the signals we would act on).
+    # Tier A: model has been right ≥65% of the time on this stock → trust it.
+    # Tier B: 55-65% → require higher prob to fire (BUY_PROBA + 0.03).
+    # Tier C: <55% or <5 signal bars → skip BUY, only WATCH.
+    TIER_A_PREC, TIER_B_PREC = 0.65, 0.55
+    stock_tiers:  dict[str, str]   = {}
+    stock_cv_acc: dict[str, float] = {}
+    for sym in np.unique(symbols_arr):
+        mask_sym = symbols_arr == sym
+        mask_sig = mask_sym & (oof_prob >= BUY_PROBA)
+        n_sig    = int(mask_sig.sum())
+        if n_sig < 5:
+            stock_tiers[sym]  = "C"
+            stock_cv_acc[sym] = float("nan")
+            continue
+        prec = float(y[mask_sig].mean())   # fraction of BUY signals that were correct
+        stock_cv_acc[sym] = round(prec, 4)
+        stock_tiers[sym]  = "A" if prec >= TIER_A_PREC else ("B" if prec >= TIER_B_PREC else "C")
+
+    tier_a = sorted([s for s, t in stock_tiers.items() if t == "A"])
+    tier_b = sorted([s for s, t in stock_tiers.items() if t == "B"])
+    tier_c = sorted([s for s, t in stock_tiers.items() if t == "C"])
+    print(f"\nPer-stock OOF BUY precision tiers ({len(stock_tiers)} stocks):")
+    print(f"  Tier A (≥{TIER_A_PREC:.0%}): {len(tier_a)} — {', '.join(tier_a)}")
+    print(f"  Tier B ({TIER_B_PREC:.0%}-{TIER_A_PREC:.0%}): {len(tier_b)} — {', '.join(tier_b)}")
+    print(f"  Tier C (<{TIER_B_PREC:.0%}): {len(tier_c)} — {', '.join(tier_c)} [WATCH only]")
 
     # --- OOT split: hold out last 30 trading days ---
     all_dates    = pd.to_datetime(panel["DateTime"]).dt.date.values
@@ -849,19 +908,21 @@ def train(symbols: list[str] | None = None, years: int = LOOKBACK_YEARS):
 
     MODEL_DIR.mkdir(exist_ok=True)
     joblib.dump({
-        "model":      final,
-        "features":   FEATURE_COLS,
-        "val_acc":    mean_acc,
-        "val_std":    std_acc,
-        "val_prec":   mean_prec,
-        "val_rec":    mean_rec,
-        "val_srec":   mean_srec,
-        "oot_acc":    oot_acc,
-        "oot_prec":   oot_prec,
-        "oot_rec":    oot_rec,
-        "n_train":    int((~oot_mask).sum()),
-        "trained_on": symbols,
-        "trained_at": str(date.today()),
+        "model":        final,
+        "features":     FEATURE_COLS,
+        "val_acc":      mean_acc,
+        "val_std":      std_acc,
+        "val_prec":     mean_prec,
+        "val_rec":      mean_rec,
+        "val_srec":     mean_srec,
+        "oot_acc":      oot_acc,
+        "oot_prec":     oot_prec,
+        "oot_rec":      oot_rec,
+        "n_train":      int((~oot_mask).sum()),
+        "trained_on":   symbols,
+        "trained_at":   str(date.today()),
+        "stock_tiers":  stock_tiers,    # v5.0: per-stock tier (1=best, 3=skip)
+        "stock_cv_acc": stock_cv_acc,   # v5.0: per-stock OOF accuracy
     }, MODEL_PATH)
     print(f"\n✓ Saved to {MODEL_PATH}")
 
@@ -937,10 +998,11 @@ def predict(symbols: list[str] | None = None):
         print('No saved model. Run "python swing_v2.py train" first.')
         return
 
-    blob    = joblib.load(MODEL_PATH)
-    model   = blob["model"]
-    val_acc = blob["val_acc"]
-    model_features = blob.get("features", FEATURE_COLS)   # backward-compat
+    blob        = joblib.load(MODEL_PATH)
+    model       = blob["model"]
+    val_acc     = blob["val_acc"]
+    stock_tiers = blob.get("stock_tiers", {})   # v5.0: per-stock BUY precision tier
+    model_features = blob.get("features", FEATURE_COLS)
 
     symbols   = symbols or WATCHLIST
     today     = date.today()
@@ -1015,6 +1077,11 @@ def predict(symbols: list[str] | None = None):
         buy_p    = float(proba[1])
         sell_p   = float(proba[0])
 
+        # Tier-adjusted threshold [v5.0]
+        stock_tier = stock_tiers.get(sym, "C")
+        _tier_bar  = {"A": BUY_PROBA, "B": BUY_PROBA + 0.03, "C": BUY_PROBA + 0.07}
+        tier_bar   = _tier_bar[stock_tier]
+
         # News + event filter
         news_feats     = {"news_score": 0.0, "news_count": 0, "news_event_type": "none",
                          "recency_days": 99}
@@ -1057,6 +1124,9 @@ def predict(symbols: list[str] | None = None):
             "macd":     (not REQUIRE_MACD)     or gv("feat_macd_hist")    >= 0,
             "breakout": (not REQUIRE_BREAKOUT) or gv("feat_dist_20d_high") > 0,
             "volume":   (not REQUIRE_VOLUME)   or gv("feat_volume_ratio") >= VOLUME_THRESHOLD,
+            # Hard momentum gate: block if BOTH stock AND market are in 3d decline [v5.0]
+            "momentum": (gv("feat_return_3d") >= -0.015 or
+                         gv("feat_nifty_return_3d") >= -0.015),
         }
         n_pass = sum(confirmations.values())
         failed = [k for k, v in confirmations.items() if not v]
@@ -1070,15 +1140,17 @@ def predict(symbols: list[str] | None = None):
         else:
             grade = "D"
 
-        bar = BUY_PROBA_STRONG_NEWS if strong_news_up else BUY_PROBA
+        # Use tier-adjusted bar [v5.0]: Tier A → 0.65, Tier B → 0.68, Tier C → 0.72
+        bar = BUY_PROBA_STRONG_NEWS if strong_news_up else tier_bar
 
         # Hard gates (must ALL pass for BUY)
         ema200_ok  = confirmations["ema200"]
         regime_ok  = not regime_blocked and not vix_extreme
         rank_ok    = sym in ranked_set
+        tier_ok    = stock_tier in ("A", "B")   # Tier C → WATCH only
 
         gate_pass = (
-            ema200_ok and regime_ok and rank_ok
+            ema200_ok and regime_ok and rank_ok and tier_ok
             and not news_blocked and not event_blocked
             and n_pass >= MIN_CONFIRMATIONS
         )
@@ -1097,10 +1169,13 @@ def predict(symbols: list[str] | None = None):
             if not regime_ok:   blockers.append("bear_regime")
             if not ema200_ok:   blockers.append("ema200")
             if not rank_ok:     blockers.append("low_rank")
+            if not tier_ok:     blockers.append(f"tier{stock_tier}")
             if news_blocked:    blockers.append("bad_news")
             if event_blocked:   blockers.append(event_reason)
+            if not confirmations.get("momentum", True):
+                blockers.append("3d_decline")
             if n_pass < MIN_CONFIRMATIONS:
-                blockers += [f for f in failed if f not in ("ema200",)]
+                blockers += [f for f in failed if f not in ("ema200", "momentum")]
 
         atr, price = float(latest.get("ATR", 0) or 0), float(latest["Close"])
         if signal == "BUY":
@@ -1120,8 +1195,9 @@ def predict(symbols: list[str] | None = None):
             "Price":    round(price, 2),
             "Signal":   signal,
             "Grade":    grade if signal == "BUY" else "",
+            "Tier":     stock_tier,
             "BUY%":     round(buy_p * 100, 1),
-            "Confs":    f"{n_pass}/7",
+            "Confs":    f"{n_pass}/8",
             "Rank":     rank_pos,
             "News":     ngrade if news_feats.get("news_count", 0) > 0 else "—",
             "Event":    news_feats.get("news_event_type", "none"),
@@ -1165,7 +1241,7 @@ def predict(symbols: list[str] | None = None):
         for _, r in watches.iterrows():
             print(f"  • {r['Symbol']:<12} BUY% {r['BUY%']}  blocked by: {r['Blockers']}")
 
-    print(f"\nLegend: Confs = gates passed (7 total) | Grade A=7/7, B=6/7, C=5/7")
+    print(f"\nLegend: Confs = gates passed (8 total) | Grade A=8/8, B=7/8, C=6/8 | Tier A/B/C = OOF precision")
     print(f"        Regime={trend_regime} | VIX={vol_regime} ({vix_raw:.1f})")
     print("⚠  Educational only — not financial advice.")
     return df_out

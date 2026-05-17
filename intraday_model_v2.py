@@ -41,7 +41,7 @@ MODEL_PATH_V2  = Path("models/intraday_v2.pkl")
 TARGET_BARS    = 6       # 6 × 5-min = 30-min lookahead
 BUY_THRESH     = 0.005   # +0.5% high-water mark → BUY
 SELL_THRESH    = -0.005  # −0.5% high-water mark → SELL
-DIR_THRESHOLD  = 0.60    # emit BUY/SELL if confidence ≥ this
+DIR_THRESHOLD  = 0.65    # emit BUY/SELL if confidence ≥ this [v3.0: raised for precision]
 HOLD_THRESHOLD = 0.52
 BUY_CLASS_THRESH = 0.47  # slight BUY bias to counter bearish-period SELL bias
 # 70/30 per-symbol temporal split (for honest test reporting).
@@ -80,9 +80,12 @@ FEATURE_COLS = [
     "buy_pressure",         # (close-low)/(high-low) — bar buying pressure
     # ── Volume ───────────────────────────────────────────────────────
     "rvol_tod",             # volume vs historical same-time-slot average
+    # ── v3.0 additions ───────────────────────────────────────────────
+    "nifty_ret_3bar",       # Nifty 15-min momentum — faster pivot detection
+    "session_vol_accel",    # volume EMA3/EMA10 ratio — accumulation acceleration
 ]
 
-assert len(FEATURE_COLS) == 22
+assert len(FEATURE_COLS) == 24
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
@@ -386,10 +389,21 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         out["rel_strength_day"] = np.clip(
             out["_stock_day_ret"].values - out["nifty_day_ret"].values * 100,
             -5, 5)
+
+        # v3.0: faster 3-bar Nifty momentum (15-min pivot detection)
+        nr3 = nc.pct_change(3).clip(-0.03, 0.03).fillna(0)
+        out["nifty_ret_3bar"] = nr3.values
     else:
         for col in ["nifty_day_ret", "nifty_ret_6bar", "nifty_rsi",
-                    "nifty_adx", "nifty_ema_sig", "rel_strength_day"]:
+                    "nifty_adx", "nifty_ema_sig", "rel_strength_day",
+                    "nifty_ret_3bar"]:
             out[col] = 0.0
+
+    # v3.0: session volume acceleration (accumulation trend within session)
+    vol_s = out["volume"] if "volume" in out.columns else pd.Series(1.0, index=out.index)
+    vol_e3  = vol_s.ewm(span=3,  adjust=False).mean()
+    vol_e10 = vol_s.ewm(span=10, adjust=False).mean().replace(0, np.nan)
+    out["session_vol_accel"] = (vol_e3 / vol_e10 - 1).clip(-2, 2).fillna(0)
 
     # drop intermediate column
     out.drop(columns=["_stock_day_ret"], inplace=True, errors="ignore")
@@ -527,10 +541,11 @@ def train(symbols: list[str], test_mode: bool = False) -> None:
     print(f"FULL TRAIN V2 — {len(symbols)} symbols · 58d · LightGBM two-stage")
     print("=" * 62)
 
-    all_X_tr:  list[pd.DataFrame] = []   # 70% training pool per symbol
-    all_y_tr:  list[pd.Series]    = []
-    all_X_oot: list[pd.DataFrame] = []   # 30% honest test per symbol
-    all_y_oot: list[pd.Series]    = []
+    all_X_tr:   list[pd.DataFrame] = []   # 70% training pool per symbol
+    all_y_tr:   list[pd.Series]    = []
+    all_X_oot:  list[pd.DataFrame] = []   # 30% honest test per symbol
+    all_y_oot:  list[pd.Series]    = []
+    sym_oot_map: dict[str, tuple]  = {}   # symbol → (Xte, yte) for per-sym tier [v3.0]
 
     for si, sym in enumerate(symbols, 1):
         df = fetch_5min(sym)
@@ -566,6 +581,7 @@ def train(symbols: list[str], test_mode: bool = False) -> None:
         all_X_tr.append(Xtr); all_y_tr.append(ytr)
         if len(Xte) > 50:
             all_X_oot.append(Xte); all_y_oot.append(yte)
+            sym_oot_map[sym] = (Xte, yte)   # v3.0: per-symbol tier tracking
 
     if not all_X_tr:
         print("No training data."); return
@@ -755,6 +771,31 @@ def train(symbols: list[str], test_mode: bool = False) -> None:
         bar = "█" * int(score / imp.max() * 30)
         print(f"  {feat:<25} {score:6.0f}  {bar}")
 
+    # ── Per-symbol OOT BUY precision → tier assignment  [v3.0] ──────────────
+    sym_tiers: dict[str, dict] = {}
+    for sym, (Xte, yte) in sym_oot_map.items():
+        try:
+            hold_po_s = model_hold.predict_proba(Xte)[:, 1]
+            dir_po_s  = _dir_proba_ens(models_dir, Xte)
+            buy_sig_s = (hold_po_s >= HOLD_THRESHOLD) & (dir_po_s >= DIR_THRESHOLD)
+            n_buy_s   = int(buy_sig_s.sum())
+            if n_buy_s < 3:
+                tier_s = "C"; prec_s = float("nan")
+            else:
+                prec_s = float(np.mean((yte.values[buy_sig_s] == 1).astype(int)))
+                tier_s = "A" if prec_s >= 0.68 else ("B" if prec_s >= 0.55 else "C")
+            sym_tiers[sym] = {"tier": tier_s, "buy_precision": prec_s, "n_signals": n_buy_s}
+        except Exception:
+            sym_tiers[sym] = {"tier": "C", "buy_precision": float("nan"), "n_signals": 0}
+
+    ta = [s for s, v in sym_tiers.items() if v["tier"] == "A"]
+    tb = [s for s, v in sym_tiers.items() if v["tier"] == "B"]
+    tc = [s for s, v in sym_tiers.items() if v["tier"] == "C"]
+    print(f"\nPer-symbol OOT BUY precision tiers:")
+    print(f"  Tier A (≥68%): {len(ta)} — {', '.join(sorted(ta))}")
+    print(f"  Tier B (55-68%): {len(tb)} — {', '.join(sorted(tb))}")
+    print(f"  Tier C (<55%): {len(tc)} — {', '.join(sorted(tc))} [signals need higher threshold]")
+
     if test_mode:
         print("\n[TEST MODE] Models NOT saved."); return
 
@@ -765,10 +806,11 @@ def train(symbols: list[str], test_mode: bool = False) -> None:
         "models_dir": models_dir,
         "model_hold": model_hold,
         "features":   FEATURE_COLS,
-        "version":    "2",
+        "version":    "3",
         "dir_threshold":  DIR_THRESHOLD,
         "hold_threshold": HOLD_THRESHOLD,
         "buy_class_thresh": BUY_CLASS_THRESH,
+        "sym_tiers":  sym_tiers,   # v3.0: per-symbol BUY precision tiers
     }, MODEL_PATH_V2)
     print(f"\nSaved → {MODEL_PATH_V2}")
 
@@ -785,6 +827,13 @@ def predict(symbol: str) -> dict:
     dir_thr    = blob.get("dir_threshold", DIR_THRESHOLD)
     hold_thr   = blob.get("hold_threshold", HOLD_THRESHOLD)
     buy_thr    = blob.get("buy_class_thresh", BUY_CLASS_THRESH)
+    sym_tiers  = blob.get("sym_tiers", {})
+
+    # Apply tier-adjusted threshold [v3.0]: Tier A=0.65, Tier B=0.68, Tier C=0.72
+    tier_info  = sym_tiers.get(symbol, {"tier": "C"})
+    stock_tier = tier_info.get("tier", "C")
+    _tier_dir  = {"A": dir_thr, "B": dir_thr + 0.03, "C": dir_thr + 0.07}
+    eff_dir_thr = _tier_dir[stock_tier]
 
     df = fetch_5min(symbol, days=5)
     default = {"signal": "HOLD", "buy_prob": 0.5, "sell_prob": 0.5,
@@ -810,9 +859,9 @@ def predict(symbol: str) -> dict:
 
     dir_proba = float(_dir_proba_ens(models_dir, X)[0])
 
-    if dir_proba >= dir_thr:
+    if dir_proba >= eff_dir_thr:
         signal = "BUY";  conf = dir_proba
-    elif (1.0 - dir_proba) >= dir_thr:
+    elif (1.0 - dir_proba) >= eff_dir_thr:
         signal = "SELL"; conf = 1.0 - dir_proba
     else:
         signal = "HOLD"; conf = max(dir_proba, 1.0 - dir_proba)
@@ -823,6 +872,7 @@ def predict(symbol: str) -> dict:
         "sell_prob":  round(1.0 - dir_proba, 3),
         "hold_prob":  round(1.0 - hold_proba, 3),
         "confidence": round(conf, 3),
+        "tier":       stock_tier,
         "data_ok":    True,
     }
 
