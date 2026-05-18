@@ -38,12 +38,12 @@ from swing_v2 import NIFTY_50
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MODEL_PATH_V2  = Path("models/intraday_v2.pkl")
-TARGET_BARS    = 6       # 6 × 5-min = 30-min lookahead
-BUY_THRESH     = 0.005   # +0.5% high-water mark → BUY
-SELL_THRESH    = -0.005  # −0.5% high-water mark → SELL
-DIR_THRESHOLD  = 0.65    # emit BUY/SELL if confidence ≥ this [v3.0: raised for precision]
+TARGET_BARS    = 8       # 8 × 5-min = 40-min lookahead [v3.1: wider window, higher quality labels]
+BUY_THRESH     = 0.007   # +0.7% high-water mark → BUY [v3.1: tighter — filter noise]
+SELL_THRESH    = -0.007  # −0.7% high-water mark → SELL
+DIR_THRESHOLD  = 0.67    # emit BUY/SELL if confidence ≥ this [v3.1: raised from 0.65]
 HOLD_THRESHOLD = 0.52
-BUY_CLASS_THRESH = 0.47  # slight BUY bias to counter bearish-period SELL bias
+BUY_CLASS_THRESH = 0.48  # neutral threshold for BUY vs SELL classification
 # 70/30 per-symbol temporal split (for honest test reporting).
 # Early stopping uses the last 15% of the CONCATENATED training pool —
 # avoids the "5-day single-symbol bias" where one bullish window gives
@@ -83,9 +83,13 @@ FEATURE_COLS = [
     # ── v3.0 additions ───────────────────────────────────────────────
     "nifty_ret_3bar",       # Nifty 15-min momentum — faster pivot detection
     "session_vol_accel",    # volume EMA3/EMA10 ratio — accumulation acceleration
+    # ── v3.1 additions ───────────────────────────────────────────────
+    "stock_rsi_5m",         # RSI(9) of stock on 5-min bars — individual momentum
+    "bb_squeeze",           # BB(20) width / ATR(14) — low = volatility squeeze
+    "stock_ema_align",      # EMA9>EMA21>EMA55 alignment score (0→3, scaled /3)
 ]
 
-assert len(FEATURE_COLS) == 24
+assert len(FEATURE_COLS) == 27
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
@@ -96,7 +100,7 @@ def _yf_sym(sym: str) -> str:
     return f"{sym}.NS"
 
 
-def fetch_5min(symbol: str, days: int = 58) -> pd.DataFrame | None:
+def fetch_5min(symbol: str, days: int = 90) -> pd.DataFrame | None:
     try:
         tk = yf.Ticker(_yf_sym(symbol))
         df = tk.history(period=f"{days}d", interval="5m", auto_adjust=True)
@@ -111,7 +115,7 @@ def fetch_5min(symbol: str, days: int = 58) -> pd.DataFrame | None:
         return None
 
 
-def fetch_nifty_5min(days: int = 60) -> pd.DataFrame | None:
+def fetch_nifty_5min(days: int = 92) -> pd.DataFrame | None:
     key = f"nifty_{days}"
     if key in _NIFTY_CACHE:
         return _NIFTY_CACHE[key]
@@ -219,7 +223,7 @@ def make_labels(df: pd.DataFrame) -> pd.Series:
 # ── Feature engineering ───────────────────────────────────────────────────────
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Return 22-feature DataFrame aligned to df's index."""
+    """Return 27-feature DataFrame aligned to df's index."""
     df       = df.sort_values("DateTime").reset_index(drop=True)
     date_col = df["DateTime"].dt.date
     close    = df["Close"]
@@ -246,6 +250,26 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # Bar buying pressure
     hl_range = (high - low).replace(0, np.nan)
     out["buy_pressure"] = ((close - low) / hl_range).clip(0, 1).fillna(0.5)
+
+    # ── v3.1 features ─────────────────────────────────────────────────
+    # stock_rsi_5m: RSI(9) of the stock on 5-min bars (most important missing signal)
+    out["stock_rsi_5m"] = (_rsi(close, 9) / 100).clip(0, 1).fillna(0.5)
+
+    # bb_squeeze: Bollinger Band(20) width / ATR(14) — squeeze = low value = breakout pending
+    bb_mid  = close.rolling(20).mean()
+    bb_std  = close.rolling(20).std(ddof=0).replace(0, np.nan)
+    bb_width = (4 * bb_std) / close.replace(0, np.nan)   # (upper-lower)/close
+    atr_pct  = atr14 / close.replace(0, np.nan)
+    out["bb_squeeze"] = (bb_width / atr_pct.replace(0, np.nan)).clip(0, 5).fillna(2.0)
+
+    # stock_ema_align: count of alignments EMA9>EMA21, EMA21>EMA55, price>EMA9 (scaled 0→1)
+    ema9  = _ema(close, 9)
+    ema21 = _ema(close, 21)
+    ema55 = _ema(close, 55)
+    align = ((close > ema9).astype(float) +
+             (ema9   > ema21).astype(float) +
+             (ema21  > ema55).astype(float)) / 3.0
+    out["stock_ema_align"] = align.fillna(0.5)
 
     # ── Per-day features ─────────────────────────────────────────────
     is_power_hr_s     = pd.Series(0.0, index=df.index)
@@ -351,7 +375,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out["_stock_day_ret"]  = stock_day_ret_s   # intermediate; removed after Nifty join
 
     # ── Nifty market-regime features ────────────────────────────────
-    nifty_df = fetch_nifty_5min(days=60)
+    nifty_df = fetch_nifty_5min(days=92)
     if nifty_df is not None and not nifty_df.empty:
         merged = df[["DateTime"]].merge(nifty_df, on="DateTime", how="left")
         nc     = merged["nifty_close"].ffill().bfill()
@@ -538,7 +562,7 @@ def walk_forward_cv(X_all: pd.DataFrame, y_all: pd.Series, n_folds: int = 3) -> 
 
 def train(symbols: list[str], test_mode: bool = False) -> None:
     print("=" * 62)
-    print(f"FULL TRAIN V2 — {len(symbols)} symbols · 58d · LightGBM two-stage")
+    print(f"FULL TRAIN V3.1 — {len(symbols)} symbols · 90d · LightGBM two-stage")
     print("=" * 62)
 
     all_X_tr:   list[pd.DataFrame] = []   # 70% training pool per symbol
@@ -749,7 +773,7 @@ def train(symbols: list[str], test_mode: bool = False) -> None:
         print(f"\n── Threshold sweep (joint hold × dir threshold) ──")
         print(f"  {'thr':>5}  {'BUY sig':>8}  {'BUY prec':>9}  "
               f"{'SELL sig':>8}  {'SELL prec':>9}  signals/day")
-        for thr in [0.52, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70]:
+        for thr in [0.55, 0.58, 0.60, 0.62, 0.65, 0.67, 0.70, 0.73, 0.75]:
             buy_e  = (hold_po >= thr) & (dir_po >= thr)
             sell_e = (hold_po >= thr) & (dir_po <= 1 - thr)
             nb_e = buy_e.sum(); ns_e = sell_e.sum()
@@ -806,7 +830,8 @@ def train(symbols: list[str], test_mode: bool = False) -> None:
         "models_dir": models_dir,
         "model_hold": model_hold,
         "features":   FEATURE_COLS,
-        "version":    "3",
+        "version":    "3.1",
+        "trained_at": __import__("datetime").date.today().isoformat(),
         "dir_threshold":  DIR_THRESHOLD,
         "hold_threshold": HOLD_THRESHOLD,
         "buy_class_thresh": BUY_CLASS_THRESH,
