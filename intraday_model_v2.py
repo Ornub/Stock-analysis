@@ -103,7 +103,8 @@ def _yf_sym(sym: str) -> str:
 def fetch_5min(symbol: str, days: int = 90) -> pd.DataFrame | None:
     try:
         tk = yf.Ticker(_yf_sym(symbol))
-        df = tk.history(period=f"{days}d", interval="5m", auto_adjust=True)
+        fetch_days = min(days, 60)  # yfinance 5-min data capped at 60 days
+        df = tk.history(period=f"{fetch_days}d", interval="5m", auto_adjust=True)
         if df is None or df.empty:
             return None
         df = df.reset_index()
@@ -121,7 +122,8 @@ def fetch_nifty_5min(days: int = 92) -> pd.DataFrame | None:
         return _NIFTY_CACHE[key]
     try:
         tk = yf.Ticker("^NSEI")
-        df = tk.history(period=f"{days}d", interval="5m", auto_adjust=True)
+        fetch_days = min(days, 60)  # yfinance 5-min data capped at 60 days
+        df = tk.history(period=f"{fetch_days}d", interval="5m", auto_adjust=True)
         if df is None or df.empty:
             _NIFTY_CACHE[key] = None
             return None
