@@ -2874,6 +2874,16 @@ with tab5:
 
     # ── Header row ────────────────────────────────────────────────────
     _hdr_c1, _hdr_c2, _hdr_c3 = st.columns([3, 1, 1])
+
+    # Regime badge — derived from last scan's Nifty day return
+    _ndr    = float(st.session_state.get("nifty_day_ret", 0.0))
+    _regime = "bear" if _ndr < -0.015 else ("bull" if _ndr > 0.015 else "neutral")
+    _r_bg   = {"bear": "#fee2e2",  "bull": "#dcfce7",  "neutral": "#f1f5f9"}[_regime]
+    _r_fg   = {"bear": "#b91c1c",  "bull": "#15803d",  "neutral": "#64748b"}[_regime]
+    _r_lbl  = {"bear": f"▼ Bear {_ndr:+.1%} — BUY suppressed",
+               "bull": f"▲ Bull {_ndr:+.1%} — SELL suppressed",
+               "neutral": f"Nifty {_ndr:+.1%}" if _ndr != 0.0 else "Nifty —"}[_regime]
+
     _hdr_c1.markdown(
         f"<div style='padding:6px 0'>"
         f"<span style='background:{_ms_col};color:#fff;border-radius:4px;"
@@ -2883,7 +2893,9 @@ with tab5:
         f"&nbsp; <span style='background:{'#dcfce7' if _ml_ready else '#fef9c3'};"
         f"color:{'#15803d' if _ml_ready else '#92400e'};border-radius:4px;"
         f"padding:1px 7px;font-size:0.68rem;font-weight:600'>"
-        f"{'ML model ready' if _ml_ready else 'ML not trained'}</span></div>",
+        f"{'ML model ready' if _ml_ready else 'ML not trained'}</span>"
+        f"&nbsp; <span style='background:{_r_bg};color:{_r_fg};border-radius:4px;"
+        f"padding:1px 7px;font-size:0.68rem;font-weight:600'>{_r_lbl}</span></div>",
         unsafe_allow_html=True,
     )
     _do_scan  = _hdr_c2.button("🔄 Refresh", use_container_width=True)
@@ -2928,16 +2940,20 @@ with tab5:
                     )
                     _v4_rows = [
                         {
-                            "symbol":     _sv4,
-                            "v4_signal":  _rv4.get("signal",    "HOLD"),
-                            "v4_premium": _rv4.get("premium",   False),
-                            "v4_stage2":  _rv4.get("stage2",    "HOLD"),
-                            "v4_dir_p":   round(_rv4.get("dir_proba",  0.0), 3),
-                            "v4_meta_p":  round(_rv4.get("meta_proba", 0.0), 3),
-                            "v4_hold_p":  round(_rv4.get("hold_proba", 0.0), 3),
+                            "symbol":          _sv4,
+                            "v4_signal":       _rv4.get("signal",    "HOLD"),
+                            "v4_premium":      _rv4.get("premium",   False),
+                            "v4_stage2":       _rv4.get("stage2",    "HOLD"),
+                            "v4_dir_p":        round(_rv4.get("dir_proba",  0.0), 3),
+                            "v4_meta_p":       round(_rv4.get("meta_proba", 0.0), 3),
+                            "v4_hold_p":       round(_rv4.get("hold_proba", 0.0), 3),
+                            "v4_suppressed":   _rv4.get("regime_suppressed", False),
                         }
                         for _sv4, _rv4 in _v4_preds.items()
                     ]
+                    # Store Nifty day return (same for all symbols — take from first result)
+                    _any = next(iter(_v4_preds.values()), {})
+                    st.session_state["nifty_day_ret"] = _any.get("nifty_day_ret", 0.0)
                     _scan_result = _scan_result.merge(
                         pd.DataFrame(_v4_rows), on="symbol", how="left"
                     )

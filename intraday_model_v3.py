@@ -72,6 +72,8 @@ def _load_blob() -> dict:
 # ── Config ──────────────────────────────────────────────────────────────────
 MODEL_PATH_V3   = Path("models/intraday_v3.pkl")
 
+REGIME_THRESHOLD = 0.015   # 1.5% Nifty day move suppresses opposite-direction signals
+
 TRAIN_FRAC      = 0.70   # first 70% per symbol → pooled Stage 1+2 training
 META_FRAC       = 0.15   # next 15% per symbol  → pooled Stage 3 meta training
 # Holdout = last 15% per symbol
@@ -649,6 +651,14 @@ def predict(symbol: str) -> dict:
         if cal >= sell_thr:
             meta_signal = "SELL"; meta_conf = cal
 
+    # Regime filter: suppress signals that fight the Nifty trend
+    nifty_day = float(latest_feats.get("nifty_day_ret", 0.0))
+    regime_suppressed = False
+    if meta_signal == "BUY" and nifty_day < -REGIME_THRESHOLD:
+        meta_signal = "HOLD"; meta_conf = 0.0; regime_suppressed = True
+    elif meta_signal == "SELL" and nifty_day > REGIME_THRESHOLD:
+        meta_signal = "HOLD"; meta_conf = 0.0; regime_suppressed = True
+
     return {
         "signal":       meta_signal,
         "stage2":       s2,
@@ -656,6 +666,8 @@ def predict(symbol: str) -> dict:
         "hold_proba":   round(hold_p, 3),
         "meta_proba":   round(meta_conf, 3),
         "premium":      premium,
+        "nifty_day_ret":    round(nifty_day, 4),
+        "regime_suppressed": regime_suppressed,
         "buy_thr":      round(buy_thr, 3),
         "sell_thr":     round(sell_thr, 3),
         "data_ok":      True,
