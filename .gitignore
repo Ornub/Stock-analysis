@@ -6,3 +6,4 @@ __pycache__/
 data/news_cache.json
 data/cache/
 data/signal_log.db
+.env

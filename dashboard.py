@@ -2898,9 +2898,36 @@ with tab5:
         f"padding:1px 7px;font-size:0.68rem;font-weight:600'>{_r_lbl}</span></div>",
         unsafe_allow_html=True,
     )
-    _do_scan  = _hdr_c2.button("🔄 Refresh", use_container_width=True)
-    _do_train = _hdr_c3.button("🧠 Train ML", use_container_width=True,
-                                help="Train intraday v4 model (3-stage: HOLD filter → direction ensemble → Premium BUY rule + Meta-SELL) on 60d of 5-min data (~5 min)")
+    _hdr_c2b, _hdr_c3b = _hdr_c2, _hdr_c3
+    try:
+        from telegram_alert import is_configured as _tg_ok
+        _alerts_on = _tg_ok()
+    except Exception:
+        _alerts_on = False
+
+    _do_scan  = _hdr_c2b.button("🔄 Refresh", use_container_width=True)
+    _do_train = _hdr_c3b.button("🧠 Train ML", use_container_width=True,
+                                 help="Train intraday v4 model (3-stage: HOLD filter → direction ensemble → Premium BUY rule + Meta-SELL) on 60d of 5-min data (~5 min)")
+
+    # Alert config row: status chip + test button
+    _alert_c1, _alert_c2 = st.columns([4, 1])
+    _alert_c1.markdown(
+        f"<div style='font-size:0.68rem;color:#64748b;padding:2px 0'>"
+        f"<span style='background:{'#dcfce7' if _alerts_on else '#f1f5f9'};"
+        f"color:{'#15803d' if _alerts_on else '#94a3b8'};border-radius:3px;"
+        f"padding:1px 6px;font-weight:600'>"
+        f"{'🔔 Alerts ON' if _alerts_on else '🔕 Alerts OFF'}</span>"
+        f"{'&nbsp; Telegram/WhatsApp alerts active' if _alerts_on else '&nbsp; Add TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to .env to enable'}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if _alert_c2.button("Test alert", use_container_width=True, disabled=not _alerts_on):
+        try:
+            from telegram_alert import test as _tg_test
+            _tg_test()
+            st.toast("Test message sent — check Telegram/WhatsApp")
+        except Exception as _ae:
+            st.error(str(_ae))
 
     if _do_train:
         with st.spinner("Training intraday v4 model (3-stage architecture, 60 days × 5-min bars)…"):
@@ -2957,17 +2984,19 @@ with tab5:
                     _scan_result = _scan_result.merge(
                         pd.DataFrame(_v4_rows), on="symbol", how="left"
                     )
-                    # Auto-log any new signals (deduplicated within 30 min)
+                    # Auto-log new signals and send alerts (deduplicated 30 min)
                     try:
                         import signal_log as _slog
                         for _sv4, _rv4 in _v4_preds.items():
                             if _rv4.get("signal", "HOLD") != "HOLD" and _rv4.get("data_ok", True):
                                 _slog.log_signal(
-                                    symbol=_sv4,
-                                    signal=_rv4["signal"],
-                                    premium=bool(_rv4.get("premium", False)),
-                                    dir_p=float(_rv4.get("dir_proba", 0.0)),
-                                    meta_p=float(_rv4.get("meta_proba", 0.0)),
+                                    symbol    = _sv4,
+                                    signal    = _rv4["signal"],
+                                    premium   = bool(_rv4.get("premium",   False)),
+                                    dir_p     = float(_rv4.get("dir_proba",  0.0)),
+                                    meta_p    = float(_rv4.get("meta_proba", 0.0)),
+                                    nifty_ret = float(_rv4.get("nifty_day_ret", 0.0)),
+                                    alert     = True,
                                 )
                     except Exception:
                         pass

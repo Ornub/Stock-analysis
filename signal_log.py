@@ -55,11 +55,14 @@ def log_signal(
     entry_price: float | None = None,
     ts: str | None = None,
     dedup_minutes: int = 30,
+    nifty_ret: float = 0.0,
+    alert: bool = True,
 ) -> int | None:
     """
     Insert a signal row. Returns the new row id, or None if deduplicated.
 
     Deduplication: skips if same symbol+signal was logged within dedup_minutes.
+    When alert=True and a new signal is inserted, sends Telegram/WhatsApp notification.
     """
     ts = ts or datetime.now().strftime("%Y-%m-%d %H:%M")
     cutoff = (datetime.now() - timedelta(minutes=dedup_minutes)).strftime("%Y-%m-%d %H:%M")
@@ -78,7 +81,17 @@ def log_signal(
             (ts, symbol, signal, int(premium),
              round(dir_p, 4), round(meta_p, 4), entry_price),
         )
-        return cur.lastrowid
+        row_id = cur.lastrowid
+
+    if alert and row_id:
+        try:
+            from telegram_alert import send_signal
+            send_signal(symbol=symbol, signal=signal, premium=premium,
+                        dir_p=dir_p, meta_p=meta_p, nifty_ret=nifty_ret)
+        except Exception:
+            pass
+
+    return row_id
 
 
 def update_outcome(signal_id: int, outcome: str, exit_price: float | None = None) -> None:
