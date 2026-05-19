@@ -3297,6 +3297,92 @@ with tab5:
                 else:
                     st.caption("No 5-min data available for today.")
 
+        # ── Open Positions ────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Open Positions")
+        try:
+            import position_tracker as _pt
+            _pos_c1, _pos_c2, _pos_c3 = st.columns([2, 2, 1])
+            _pt_sum = _pt.portfolio_summary()
+            _pos_c1.metric("Open positions",  _pt_sum["open_count"])
+            _pos_c2.metric("Total invested",
+                           f"₹{_pt_sum['total_invested']:,.0f}" if _pt_sum["total_invested"] else "—")
+            with _pos_c3:
+                if st.button("Check exits", use_container_width=True,
+                             help="Fetch LTP for open positions and auto-close any that hit stop/target"):
+                    try:
+                        _closed = _pt.auto_check_exits(send_alert=True)
+                        st.success(f"Closed {_closed} position(s)")
+                    except Exception as _pe:
+                        st.error(str(_pe))
+
+            _open_df = _pt.enrich_open_with_ltp() if _pt_sum["open_count"] else _pt.get_open()
+            if _open_df.empty:
+                st.caption("No open positions. Use the risk calculator to size a trade, then open it here.")
+            else:
+                # Add a position from scan button area
+                def _style_pos(row):
+                    styles = []
+                    for col in row.index:
+                        if col == "direction":
+                            styles.append("color:#15803d;font-weight:700" if row["direction"] == "BUY"
+                                          else "color:#b91c1c;font-weight:700")
+                        elif col in ("unrealized_pct", "unrealized_inr"):
+                            try:
+                                v = float(row.get(col) or 0)
+                                styles.append("color:#15803d;font-weight:700" if v > 0
+                                              else "color:#b91c1c;font-weight:700")
+                            except Exception:
+                                styles.append("color:#94a3b8")
+                        else:
+                            styles.append("color:#CBD5E1")
+                    return styles
+
+                _pos_show = ["symbol", "direction", "qty", "entry_price", "stop_price",
+                             "target_price", "ltp", "unrealized_pct", "unrealized_inr", "entry_ts"]
+                _pos_show = [c for c in _pos_show if c in _open_df.columns]
+                _pos_fmt  = {
+                    "entry_price":    "₹{:,.1f}",
+                    "stop_price":     "₹{:,.1f}",
+                    "target_price":   "₹{:,.1f}",
+                    "ltp":            "₹{:,.1f}",
+                    "unrealized_pct": "{:+.2f}%",
+                    "unrealized_inr": "₹{:+,.0f}",
+                }
+                st.dataframe(
+                    _open_df[_pos_show].style
+                    .apply(_style_pos, axis=1)
+                    .format({k: v for k, v in _pos_fmt.items() if k in _pos_show}, na_rep="—"),
+                    use_container_width=True, height=200,
+                )
+
+            # Quick open-position form (collapsed)
+            with st.expander("Open a position manually"):
+                _pf1, _pf2, _pf3, _pf4 = st.columns(4)
+                _pf_sym  = _pf1.text_input("Symbol", key="pf_sym").upper().strip()
+                _pf_dir  = _pf2.selectbox("Direction", ["BUY", "SELL"], key="pf_dir")
+                _pf_qty  = _pf3.number_input("Qty", min_value=1, value=10, key="pf_qty")
+                _pf_ep   = _pf4.number_input("Entry ₹", min_value=0.0, value=0.0, step=0.5, key="pf_ep")
+                _pf5, _pf6, _pf7 = st.columns(3)
+                _pf_sl   = _pf5.number_input("Stop ₹", min_value=0.0, value=0.0, step=0.5, key="pf_sl")
+                _pf_tgt  = _pf6.number_input("Target ₹", min_value=0.0, value=0.0, step=0.5, key="pf_tgt")
+                _pf_risk = _pf7.number_input("Capital risked ₹", min_value=0.0, value=0.0, step=100.0, key="pf_risk")
+                if st.button("Open position", use_container_width=True) and _pf_sym and _pf_ep > 0:
+                    try:
+                        _new_id = _pt.open_position(
+                            symbol=_pf_sym, direction=_pf_dir, qty=int(_pf_qty),
+                            entry_price=_pf_ep,
+                            stop_price=_pf_sl if _pf_sl > 0 else None,
+                            target_price=_pf_tgt if _pf_tgt > 0 else None,
+                            capital_risked=_pf_risk if _pf_risk > 0 else None,
+                        )
+                        st.success(f"Position #{_new_id} opened: {_pf_dir} {int(_pf_qty)} {_pf_sym} @ ₹{_pf_ep:,.1f}")
+                        st.rerun()
+                    except Exception as _ope:
+                        st.error(str(_ope))
+        except Exception:
+            st.caption("Position tracker unavailable.")
+
         # ── Signal Log ────────────────────────────────────────────────────────
         st.markdown("---")
         st.markdown("#### Signal Log")
@@ -3378,6 +3464,71 @@ with tab5:
                             na_rep="—"),
                     use_container_width=True, height=260,
                 )
+            # ── Performance analytics charts ──────────────────────────────
+            if not _log_df.empty:
+                _closed_df = _log_df[_log_df["outcome"].notna()].copy()
+                if len(_closed_df) >= 2:
+                    st.markdown("##### Performance Analytics")
+                    _an_c1, _an_c2 = st.columns(2)
+
+                    with _an_c1:
+                        # Cumulative P&L line chart
+                        import plotly.graph_objects as _pgo
+                        _cum = _closed_df.sort_values("outcome_ts")["pnl_pct"].cumsum().reset_index(drop=True)
+                        _ct2 = _chart_theme()
+                        _fig_pnl = _pgo.Figure()
+                        _fig_pnl.add_trace(_pgo.Scatter(
+                            x=list(range(len(_cum))), y=_cum.tolist(),
+                            mode="lines+markers",
+                            line=dict(color="#22d3ee", width=2),
+                            fill="tozeroy",
+                            fillcolor="rgba(34,211,238,0.08)",
+                            name="Cumulative P&L %",
+                        ))
+                        _fig_pnl.add_hline(y=0, line_dash="dot", line_color="#475569", line_width=1)
+                        _fig_pnl.update_layout(
+                            template=_ct2["template"],
+                            paper_bgcolor=_ct2["paper_bgcolor"],
+                            plot_bgcolor=_ct2["plot_bgcolor"],
+                            height=200, margin=dict(l=10, r=10, t=25, b=10),
+                            title=dict(text="Cumulative P&L (%)", font=dict(size=11, color=_ct2["font_color"])),
+                            xaxis=dict(title="trade #", tickfont=dict(size=8, color=_ct2["tickcolor"]),
+                                       gridcolor=_ct2["gridcolor"]),
+                            yaxis=dict(ticksuffix="%", tickfont=dict(size=8, color=_ct2["tickcolor"]),
+                                       gridcolor=_ct2["gridcolor"]),
+                            showlegend=False,
+                        )
+                        st.plotly_chart(_fig_pnl, use_container_width=True)
+
+                    with _an_c2:
+                        # Win rate by type
+                        _wr_rows = []
+                        for _lbl, _mask in [
+                            ("All BUY",       _closed_df["signal"] == "BUY"),
+                            ("All SELL",      _closed_df["signal"] == "SELL"),
+                            ("★ Premium BUY", (_closed_df["signal"] == "BUY") & (_closed_df["premium"] == 1)),
+                            ("Regular BUY",   (_closed_df["signal"] == "BUY") & (_closed_df["premium"] == 0)),
+                        ]:
+                            _sub = _closed_df[_mask]
+                            if len(_sub) == 0:
+                                continue
+                            _w = int((_sub["outcome"] == "WIN").sum())
+                            _wr_rows.append({
+                                "Type": _lbl,
+                                "Trades": len(_sub),
+                                "Win %": f"{_w/len(_sub):.0%}",
+                                "Avg P&L": f"{_sub['pnl_pct'].mean():+.2f}%",
+                            })
+                        if _wr_rows:
+                            st.markdown(
+                                "<div style='font-size:0.72rem;font-weight:700;color:#64748b;"
+                                "margin-bottom:6px'>WIN RATE BY TYPE</div>",
+                                unsafe_allow_html=True,
+                            )
+                            st.dataframe(
+                                pd.DataFrame(_wr_rows),
+                                use_container_width=True, hide_index=True, height=180,
+                            )
         except Exception:
             st.caption("Signal log unavailable.")
 
