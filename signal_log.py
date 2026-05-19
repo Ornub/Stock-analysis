@@ -1,8 +1,9 @@
 """
-signal_log.py — Persistent SQLite log for intraday v4 signals.
+signal_log.py — Persistent SQLite log for intraday v4 signals with P&L tracking.
 
-Every non-HOLD signal that fires during a scan is stored here.
-Outcomes (WIN/LOSS) can be marked manually or via update_outcomes().
+Every non-HOLD signal stores entry, stop, target, and R:R from the model.
+Outcomes (WIN/LOSS) are marked when price hits stop or target.
+P&L is calculated as percentage of entry price.
 """
 from __future__ import annotations
 
@@ -34,11 +35,27 @@ def _init() -> None:
                 dir_p        REAL,
                 meta_p       REAL,
                 entry_price  REAL,
+                stop_price   REAL,
+                target_price REAL,
+                rr           REAL,
+                atr_5m       REAL,
                 outcome      TEXT,
                 exit_price   REAL,
+                pnl_pct      REAL,
                 outcome_ts   TEXT
             )
         """)
+        # Migrate older DB that lacks the new columns
+        existing = {r[1] for r in con.execute("PRAGMA table_info(signals)").fetchall()}
+        for col, typedef in [
+            ("stop_price",   "REAL"),
+            ("target_price", "REAL"),
+            ("rr",           "REAL"),
+            ("atr_5m",       "REAL"),
+            ("pnl_pct",      "REAL"),
+        ]:
+            if col not in existing:
+                con.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
 
 
 _init()
@@ -53,6 +70,10 @@ def log_signal(
     dir_p: float = 0.0,
     meta_p: float = 0.0,
     entry_price: float | None = None,
+    stop_price: float | None = None,
+    target_price: float | None = None,
+    rr: float | None = None,
+    atr_5m: float | None = None,
     ts: str | None = None,
     dedup_minutes: int = 30,
     nifty_ret: float = 0.0,
@@ -60,9 +81,7 @@ def log_signal(
 ) -> int | None:
     """
     Insert a signal row. Returns the new row id, or None if deduplicated.
-
-    Deduplication: skips if same symbol+signal was logged within dedup_minutes.
-    When alert=True and a new signal is inserted, sends Telegram/WhatsApp notification.
+    When alert=True and the signal is new, sends Telegram/WhatsApp notification.
     """
     ts = ts or datetime.now().strftime("%Y-%m-%d %H:%M")
     cutoff = (datetime.now() - timedelta(minutes=dedup_minutes)).strftime("%Y-%m-%d %H:%M")
@@ -76,10 +95,14 @@ def log_signal(
             return None
 
         cur = con.execute(
-            """INSERT INTO signals (ts, symbol, signal, premium, dir_p, meta_p, entry_price)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO signals
+               (ts, symbol, signal, premium, dir_p, meta_p,
+                entry_price, stop_price, target_price, rr, atr_5m)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (ts, symbol, signal, int(premium),
-             round(dir_p, 4), round(meta_p, 4), entry_price),
+             _r(dir_p), _r(meta_p),
+             _r(entry_price), _r(stop_price), _r(target_price),
+             _r(rr), _r(atr_5m)),
         )
         row_id = cur.lastrowid
 
@@ -87,27 +110,56 @@ def log_signal(
         try:
             from telegram_alert import send_signal
             send_signal(symbol=symbol, signal=signal, premium=premium,
-                        dir_p=dir_p, meta_p=meta_p, nifty_ret=nifty_ret)
+                        dir_p=dir_p, meta_p=meta_p, nifty_ret=nifty_ret,
+                        entry_price=entry_price, stop_price=stop_price,
+                        target_price=target_price, rr=rr)
         except Exception:
             pass
 
     return row_id
 
 
-def update_outcome(signal_id: int, outcome: str, exit_price: float | None = None) -> None:
+def _r(v, digits: int = 4):
+    """Round to digits if numeric, else None."""
+    try:
+        return round(float(v), digits) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def update_outcome(
+    signal_id: int,
+    outcome: str,
+    exit_price: float | None = None,
+) -> None:
+    """Mark a signal WIN or LOSS and compute P&L."""
+    pnl_pct = None
+    if exit_price:
+        with _conn() as con:
+            row = con.execute(
+                "SELECT signal, entry_price FROM signals WHERE id=?", (signal_id,)
+            ).fetchone()
+        if row and row["entry_price"]:
+            entry = float(row["entry_price"])
+            move  = (float(exit_price) - entry) / entry * 100
+            # P&L is positive for correct direction, negative for wrong
+            pnl_pct = round(move if row["signal"] == "BUY" else -move, 3)
+
     with _conn() as con:
         con.execute(
-            "UPDATE signals SET outcome=?, exit_price=?, outcome_ts=? WHERE id=?",
-            (outcome, exit_price,
+            """UPDATE signals
+               SET outcome=?, exit_price=?, pnl_pct=?, outcome_ts=?
+               WHERE id=?""",
+            (outcome, _r(exit_price, 2), pnl_pct,
              datetime.now().strftime("%Y-%m-%d %H:%M"), signal_id),
         )
 
 
-def auto_update_outcomes(win_pct: float = 0.7, loss_pct: float = 0.5) -> int:
+def auto_update_outcomes() -> int:
     """
-    Fetch current prices for pending signals and mark WIN/LOSS.
-    WIN  : price moved ≥ win_pct% in signal direction.
-    LOSS : price moved ≥ loss_pct% against signal direction.
+    Fetch current prices for pending signals and mark WIN/LOSS using
+    the stored stop_price / target_price levels.
+    Falls back to ±0.7% / ±0.5% if prices weren't stored.
     Returns number of signals updated.
     """
     pending = get_pending()
@@ -123,30 +175,53 @@ def auto_update_outcomes(win_pct: float = 0.7, loss_pct: float = 0.5) -> int:
     except Exception:
         return 0
 
-    updated = 0
-    for _, row in pending.iterrows():
-        sym = row["symbol"]
-        entry = row["entry_price"]
-        if not entry:
-            continue
+    def _cur_price(sym: str) -> float | None:
         try:
             if len(syms) == 1:
-                cur = float(prices["Close"].iloc[-1])
-            else:
-                cur = float(prices[f"{sym}.NS"]["Close"].iloc[-1])
-            ret = (cur - entry) / entry * 100
-            if row["signal"] == "BUY":
-                if ret >= win_pct:
-                    update_outcome(row["id"], "WIN",  cur); updated += 1
-                elif ret <= -loss_pct:
-                    update_outcome(row["id"], "LOSS", cur); updated += 1
-            elif row["signal"] == "SELL":
-                if ret <= -win_pct:
-                    update_outcome(row["id"], "WIN",  cur); updated += 1
-                elif ret >= loss_pct:
-                    update_outcome(row["id"], "LOSS", cur); updated += 1
+                return float(prices["Close"].iloc[-1])
+            return float(prices[f"{sym}.NS"]["Close"].iloc[-1])
         except Exception:
-            pass
+            return None
+
+    updated = 0
+    for _, row in pending.iterrows():
+        entry  = row.get("entry_price")
+        stop   = row.get("stop_price")
+        target = row.get("target_price")
+        if not entry:
+            continue
+
+        cur = _cur_price(row["symbol"])
+        if cur is None:
+            continue
+
+        sig = row["signal"]
+        outcome = None
+
+        if stop and target:
+            # Use model-defined levels
+            if sig == "BUY":
+                if cur >= target:
+                    outcome = "WIN"
+                elif cur <= stop:
+                    outcome = "LOSS"
+            else:  # SELL
+                if cur <= target:
+                    outcome = "WIN"
+                elif cur >= stop:
+                    outcome = "LOSS"
+        else:
+            # Fallback: fixed % thresholds
+            ret = (cur - entry) / entry * 100
+            if sig == "BUY":
+                outcome = "WIN" if ret >= 0.7 else ("LOSS" if ret <= -0.5 else None)
+            else:
+                outcome = "WIN" if ret <= -0.7 else ("LOSS" if ret >= 0.5 else None)
+
+        if outcome:
+            update_outcome(int(row["id"]), outcome, cur)
+            updated += 1
+
     return updated
 
 
@@ -169,26 +244,30 @@ def get_today() -> pd.DataFrame:
 
 
 def get_pending() -> pd.DataFrame:
-    """Signals without an outcome yet."""
     with _conn() as con:
         return pd.read_sql(
-            "SELECT * FROM signals WHERE outcome IS NULL ORDER BY id DESC",
-            con,
+            "SELECT * FROM signals WHERE outcome IS NULL ORDER BY id DESC", con,
         )
 
 
 def summary() -> dict:
     with _conn() as con:
         rows = con.execute("SELECT outcome, COUNT(*) AS n FROM signals GROUP BY outcome").fetchall()
-    counts = {r["outcome"]: r["n"] for r in rows}
-    total  = sum(counts.values())
-    wins   = counts.get("WIN",  0)
-    losses = counts.get("LOSS", 0)
-    closed = wins + losses
+        pnl  = con.execute(
+            "SELECT SUM(pnl_pct) as total_pnl, AVG(pnl_pct) as avg_pnl "
+            "FROM signals WHERE outcome IS NOT NULL"
+        ).fetchone()
+    counts  = {r["outcome"]: r["n"] for r in rows}
+    total   = sum(counts.values())
+    wins    = counts.get("WIN",  0)
+    losses  = counts.get("LOSS", 0)
+    closed  = wins + losses
     return {
-        "total":    total,
-        "wins":     wins,
-        "losses":   losses,
-        "pending":  counts.get(None, 0),
-        "win_rate": round(wins / closed, 3) if closed else None,
+        "total":     total,
+        "wins":      wins,
+        "losses":    losses,
+        "pending":   counts.get(None, 0),
+        "win_rate":  round(wins / closed, 3) if closed else None,
+        "total_pnl": round(float(pnl["total_pnl"]), 2) if pnl["total_pnl"] else 0.0,
+        "avg_pnl":   round(float(pnl["avg_pnl"]),   2) if pnl["avg_pnl"]   else 0.0,
     }

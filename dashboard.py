@@ -2984,19 +2984,24 @@ with tab5:
                     _scan_result = _scan_result.merge(
                         pd.DataFrame(_v4_rows), on="symbol", how="left"
                     )
-                    # Auto-log new signals and send alerts (deduplicated 30 min)
+                    # Auto-log new signals with stop/target/P&L (deduplicated 30 min)
                     try:
                         import signal_log as _slog
                         for _sv4, _rv4 in _v4_preds.items():
                             if _rv4.get("signal", "HOLD") != "HOLD" and _rv4.get("data_ok", True):
                                 _slog.log_signal(
-                                    symbol    = _sv4,
-                                    signal    = _rv4["signal"],
-                                    premium   = bool(_rv4.get("premium",   False)),
-                                    dir_p     = float(_rv4.get("dir_proba",  0.0)),
-                                    meta_p    = float(_rv4.get("meta_proba", 0.0)),
-                                    nifty_ret = float(_rv4.get("nifty_day_ret", 0.0)),
-                                    alert     = True,
+                                    symbol       = _sv4,
+                                    signal       = _rv4["signal"],
+                                    premium      = bool(_rv4.get("premium",      False)),
+                                    dir_p        = float(_rv4.get("dir_proba",   0.0)),
+                                    meta_p       = float(_rv4.get("meta_proba",  0.0)),
+                                    entry_price  = _rv4.get("entry_price"),
+                                    stop_price   = _rv4.get("stop_price"),
+                                    target_price = _rv4.get("target_price"),
+                                    rr           = _rv4.get("rr"),
+                                    atr_5m       = _rv4.get("atr_5m"),
+                                    nifty_ret    = float(_rv4.get("nifty_day_ret", 0.0)),
+                                    alert        = True,
                                 )
                     except Exception:
                         pass
@@ -3296,12 +3301,16 @@ with tab5:
                         st.error(str(_oe))
 
             _log_summary = _slog.summary()
-            _ls1, _ls2, _ls3, _ls4 = st.columns(4)
+            _ls1, _ls2, _ls3, _ls4, _ls5, _ls6 = st.columns(6)
             _ls1.metric("Total logged",  _log_summary["total"])
             _ls2.metric("Pending",       _log_summary["pending"])
             _ls3.metric("Wins / Losses", f"{_log_summary['wins']} / {_log_summary['losses']}")
             _ls4.metric("Win rate",
                         f"{_log_summary['win_rate']:.0%}" if _log_summary["win_rate"] is not None else "—")
+            _ls5.metric("Total P&L",
+                        f"{_log_summary['total_pnl']:+.2f}%" if _log_summary["total_pnl"] != 0 else "—")
+            _ls6.metric("Avg P&L / trade",
+                        f"{_log_summary['avg_pnl']:+.2f}%" if _log_summary["avg_pnl"] != 0 else "—")
 
             _log_df = _slog.get_recent(40)
             if _log_df.empty:
@@ -3322,21 +3331,40 @@ with tab5:
                             )
                         elif col == "premium":
                             styles.append("color:#d97706;font-weight:700" if row.get("premium") else "color:#94a3b8")
+                        elif col == "pnl_pct":
+                            try:
+                                v = float(row.get("pnl_pct") or 0)
+                                styles.append("color:#15803d;font-weight:700" if v > 0
+                                              else ("color:#b91c1c;font-weight:700" if v < 0
+                                                    else "color:#94a3b8"))
+                            except Exception:
+                                styles.append("color:#94a3b8")
+                        elif col == "rr":
+                            styles.append("color:#a78bfa")
                         else:
                             styles.append("color:#CBD5E1")
                     return styles
 
-                _log_show_cols = ["ts", "symbol", "signal", "premium", "dir_p",
-                                  "meta_p", "entry_price", "outcome", "exit_price"]
+                _log_show_cols = ["ts", "symbol", "signal", "premium", "dir_p", "meta_p",
+                                  "entry_price", "stop_price", "target_price", "rr",
+                                  "outcome", "exit_price", "pnl_pct"]
                 _log_show_cols = [c for c in _log_show_cols if c in _log_df.columns]
-                _log_fmt = {"dir_p": "{:.0%}", "meta_p": "{:.0%}",
-                            "entry_price": "₹{:,.1f}", "exit_price": "₹{:,.1f}"}
+                _log_fmt = {
+                    "dir_p":        "{:.0%}",
+                    "meta_p":       "{:.0%}",
+                    "entry_price":  "₹{:,.1f}",
+                    "stop_price":   "₹{:,.1f}",
+                    "target_price": "₹{:,.1f}",
+                    "exit_price":   "₹{:,.1f}",
+                    "rr":           "1:{:.2f}",
+                    "pnl_pct":      "{:+.2f}%",
+                }
                 st.dataframe(
                     _log_df[_log_show_cols].style
                     .apply(_style_log, axis=1)
                     .format({k: v for k, v in _log_fmt.items() if k in _log_show_cols},
                             na_rep="—"),
-                    use_container_width=True, height=240,
+                    use_container_width=True, height=260,
                 )
         except Exception:
             st.caption("Signal log unavailable.")

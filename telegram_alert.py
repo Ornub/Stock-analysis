@@ -63,6 +63,10 @@ def format_signal(
     meta_p: float = 0.0,
     nifty_ret: float = 0.0,
     suppressed: bool = False,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    target_price: float | None = None,
+    rr: float | None = None,
 ) -> str:
     """Return a concise, emoji-rich alert message."""
     if suppressed:
@@ -77,6 +81,13 @@ def format_signal(
         f"{emoji} <b>{prem}{signal}: {symbol}</b>",
         conf_s,
     ]
+    if entry_price is not None:
+        entry_s = f"Entry ₹{entry_price:,.1f}"
+        if stop_price is not None and target_price is not None:
+            entry_s += f"  |  SL ₹{stop_price:,.1f}  |  Target ₹{target_price:,.1f}"
+            if rr is not None:
+                entry_s += f"  |  R:R 1:{rr:.2f}"
+        lines.append(entry_s)
     if nifty_s:
         lines.append(nifty_s)
     if premium:
@@ -159,9 +170,14 @@ def send_signal(
     meta_p: float = 0.0,
     nifty_ret: float = 0.0,
     suppressed: bool = False,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    target_price: float | None = None,
+    rr: float | None = None,
 ) -> dict[str, bool]:
     """Format and send a signal alert. Returns {} if suppressed or unconfigured."""
-    msg = format_signal(symbol, signal, premium, dir_p, meta_p, nifty_ret, suppressed)
+    msg = format_signal(symbol, signal, premium, dir_p, meta_p, nifty_ret, suppressed,
+                        entry_price, stop_price, target_price, rr)
     if not msg:
         return {}
     return send(msg)

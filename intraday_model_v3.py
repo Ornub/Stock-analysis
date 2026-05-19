@@ -603,14 +603,29 @@ def predict(symbol: str) -> dict:
     pre_flt       = blob.get("base_pre_filter",    BASE_PRE_FILTER)
 
     try:
-        from data_cache import get_features
-        feats = get_features(symbol, days=5)
+        from data_cache import get_features, get_bars
+        feats    = get_features(symbol, days=5)
+        raw_bars = get_bars(symbol, days=5)
     except ImportError:
-        df = fetch_5min(symbol, days=5)
-        feats = compute_features_v3(df) if df is not None and len(df) >= 40 else None
+        raw_bars = fetch_5min(symbol, days=5)
+        feats    = compute_features_v3(raw_bars) if raw_bars is not None and len(raw_bars) >= 40 else None
 
     if feats is None or feats.empty:
         return {"signal": "HOLD", "error": "no data / feature error", "data_ok": False}
+
+    # Current price and ATR(14) from 5-min bars for stop/target calculation
+    entry_price = stop_price = target_price = atr_5m = None
+    if raw_bars is not None and len(raw_bars) >= 15:
+        closes = raw_bars["Close"].astype(float)
+        highs  = raw_bars["High"].astype(float)
+        lows   = raw_bars["Low"].astype(float)
+        entry_price = round(float(closes.iloc[-1]), 2)
+        tr = pd.concat([
+            highs - lows,
+            (highs - closes.shift(1)).abs(),
+            (lows  - closes.shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        atr_5m = float(tr.rolling(14).mean().iloc[-1])
 
     X = feats[feat_cols].tail(1)
     if X.isna().any().any():
@@ -659,6 +674,20 @@ def predict(symbol: str) -> dict:
     elif meta_signal == "SELL" and nifty_day > REGIME_THRESHOLD:
         meta_signal = "HOLD"; meta_conf = 0.0; regime_suppressed = True
 
+    # Stop loss and target (ATR-based)
+    # Premium BUY  : tight stop (1.0× ATR), generous target (1.5× ATR) → R:R 1:1.5
+    # Meta-SELL    : wider stop (1.5× ATR), target (2.0× ATR)           → R:R 1:1.33
+    rr = None
+    if entry_price and atr_5m and not np.isnan(atr_5m) and meta_signal != "HOLD":
+        if meta_signal == "BUY":
+            stop_price   = round(entry_price - 1.0 * atr_5m, 2)
+            target_price = round(entry_price + 1.5 * atr_5m, 2)
+            rr = 1.5
+        else:  # SELL
+            stop_price   = round(entry_price + 1.5 * atr_5m, 2)
+            target_price = round(entry_price - 2.0 * atr_5m, 2)
+            rr = round((entry_price - target_price) / (stop_price - entry_price), 2)
+
     return {
         "signal":       meta_signal,
         "stage2":       s2,
@@ -666,7 +695,12 @@ def predict(symbol: str) -> dict:
         "hold_proba":   round(hold_p, 3),
         "meta_proba":   round(meta_conf, 3),
         "premium":      premium,
-        "nifty_day_ret":    round(nifty_day, 4),
+        "entry_price":  entry_price,
+        "stop_price":   stop_price,
+        "target_price": target_price,
+        "atr_5m":       round(atr_5m, 2) if atr_5m and not np.isnan(atr_5m) else None,
+        "rr":           rr,
+        "nifty_day_ret":     round(nifty_day, 4),
         "regime_suppressed": regime_suppressed,
         "buy_thr":      round(buy_thr, 3),
         "sell_thr":     round(sell_thr, 3),
