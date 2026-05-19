@@ -1,5 +1,5 @@
 """
-telegram_alert.py — Send intraday signal alerts via Telegram and/or WhatsApp.
+alerts.py (imported as telegram_alert) — WhatsApp push alerts via CallMeBot.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  WHATSAPP SETUP  (free, ~3 min, no payment needed)
@@ -18,17 +18,6 @@ telegram_alert.py — Send intraday signal alerts via Telegram and/or WhatsApp.
       WHATSAPP_APIKEY=1234567
 
  5. Test: python telegram_alert.py
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- TELEGRAM SETUP  (optional, also free)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 1. Message @BotFather → /newbot → copy the token
- 2. Message your bot once, then open:
-      https://api.telegram.org/bot<TOKEN>/getUpdates
-    Copy the chat_id from the JSON response
- 3. Add to .env:
-      TELEGRAM_BOT_TOKEN=123456:ABCdef...
-      TELEGRAM_CHAT_ID=987654321
 """
 from __future__ import annotations
 
@@ -47,10 +36,8 @@ if _env.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
 
-TG_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN",  "")
-TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID",    "")
-WA_PHONE   = os.getenv("WHATSAPP_PHONE",       "")
-WA_APIKEY  = os.getenv("WHATSAPP_APIKEY",      "")
+WA_PHONE  = os.getenv("WHATSAPP_PHONE",  "")
+WA_APIKEY = os.getenv("WHATSAPP_APIKEY", "")
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -68,17 +55,16 @@ def format_signal(
     target_price: float | None = None,
     rr: float | None = None,
 ) -> str:
-    """Return a concise, emoji-rich alert message."""
+    """Return a concise alert message for WhatsApp."""
     if suppressed:
-        return ""   # regime-suppressed: don't alert
+        return ""
 
-    emoji   = "📈" if signal == "BUY" else "📉"
-    prem    = "⭐ PREMIUM " if premium else ""
-    nifty_s = f"Nifty {nifty_ret:+.1%}" if nifty_ret != 0.0 else ""
-    conf_s  = f"dir {dir_p:.0%}" + (f"  meta {meta_p:.0%}" if meta_p else "")
+    emoji  = "📈" if signal == "BUY" else "📉"
+    prem   = "⭐ PREMIUM " if premium else ""
+    conf_s = f"dir {dir_p:.0%}" + (f"  meta {meta_p:.0%}" if meta_p else "")
 
     lines = [
-        f"{emoji} <b>{prem}{signal}: {symbol}</b>",
+        f"{emoji} {prem}{signal}: {symbol}",
         conf_s,
     ]
     if entry_price is not None:
@@ -88,41 +74,16 @@ def format_signal(
             if rr is not None:
                 entry_s += f"  |  R:R 1:{rr:.2f}"
         lines.append(entry_s)
-    if nifty_s:
-        lines.append(nifty_s)
+    if nifty_ret != 0.0:
+        lines.append(f"Nifty {nifty_ret:+.1%}")
     if premium:
         lines.append("Contrarian oversold bounce — power hour")
     return "\n".join(lines)
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
-
-def _tg_send(text: str) -> bool:
-    if not TG_TOKEN or not TG_CHAT_ID or not text:
-        return False
-    try:
-        import urllib.request, json
-        payload = json.dumps({
-            "chat_id":    TG_CHAT_ID,
-            "text":       text,
-            "parse_mode": "HTML",
-        }).encode()
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.status == 200
-    except Exception as exc:
-        print(f"[telegram] send failed: {exc}")
-        return False
-
-
 # ── WhatsApp (CallMeBot — free personal API) ─────────────────────────────────
 
 def _strip_html(text: str) -> str:
-    """Remove HTML tags; CallMeBot requires plain text."""
     return re.sub(r"<[^>]+>", "", text)
 
 
@@ -139,14 +100,13 @@ def _wa_send(text: str, retries: int = 2) -> bool:
             import urllib.request
             with urllib.request.urlopen(url, timeout=10) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
-                # CallMeBot always returns HTTP 200; check body for errors
                 if "error" in body.lower() and "message" not in body.lower():
                     print(f"[whatsapp] API error: {body[:120]}")
                     return False
                 return True
         except Exception as exc:
             if attempt < retries:
-                time.sleep(2 ** attempt)   # 1s, 2s back-off
+                time.sleep(2 ** attempt)
             else:
                 print(f"[whatsapp] send failed after {retries+1} attempts: {exc}")
     return False
@@ -155,11 +115,8 @@ def _wa_send(text: str, retries: int = 2) -> bool:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def send(text: str) -> dict[str, bool]:
-    """Send raw text to all configured channels. Returns {channel: success}."""
-    return {
-        "telegram":  _tg_send(text),
-        "whatsapp":  _wa_send(text),
-    }
+    """Send raw text to WhatsApp. Returns {channel: success}."""
+    return {"whatsapp": _wa_send(text)}
 
 
 def send_signal(
@@ -183,31 +140,22 @@ def send_signal(
     return send(msg)
 
 
-def test() -> None:
-    """Send a test message to all configured channels."""
-    msg = "✅ Stock-analysis alert test\nNotifications are working."
-    if not TG_TOKEN and not WA_PHONE:
-        print("No channels configured.")
-        print("WhatsApp: add WHATSAPP_PHONE and WHATSAPP_APIKEY to .env")
-        print("Telegram: add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to .env")
-        return
-    results = send(msg)
-    for ch, ok in results.items():
-        configured = (ch == "telegram" and TG_TOKEN) or (ch == "whatsapp" and WA_PHONE)
-        if not configured:
-            continue
-        if ok:
-            print(f"✓ {ch}: message sent successfully")
-        else:
-            hints = {
-                "whatsapp": "check WHATSAPP_PHONE (country code, no +) and WHATSAPP_APIKEY",
-                "telegram": "check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID",
-            }
-            print(f"✗ {ch}: send failed — {hints[ch]}")
-
-
 def is_configured() -> bool:
-    return bool(TG_TOKEN and TG_CHAT_ID) or bool(WA_PHONE and WA_APIKEY)
+    return bool(WA_PHONE and WA_APIKEY)
+
+
+def test() -> None:
+    """Send a test message to WhatsApp."""
+    if not WA_PHONE or not WA_APIKEY:
+        print("WhatsApp not configured.")
+        print("Add WHATSAPP_PHONE and WHATSAPP_APIKEY to .env")
+        return
+    msg = "✅ Stock-analysis alert test\nNotifications are working."
+    ok = _wa_send(msg)
+    if ok:
+        print("✓ WhatsApp: message sent successfully")
+    else:
+        print("✗ WhatsApp: send failed — check WHATSAPP_PHONE (country code, no +) and WHATSAPP_APIKEY")
 
 
 if __name__ == "__main__":

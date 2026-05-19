@@ -1,7 +1,10 @@
 """
 data_cache.py — Pickle-based TTL cache for 5-min bar data.
 
-Eliminates repeated yfinance calls on dashboard refresh.
+Data source priority:
+  1. Angel One SmartAPI  (real-time, no 15-min delay) — used when ANGEL_* .env vars are set
+  2. yfinance            (15-min delayed fallback)
+
 TTL: 5 min while market is open, 2 hours when closed.
 """
 from __future__ import annotations
@@ -33,8 +36,36 @@ def _cache_path(symbol: str) -> Path:
     return _CACHE_DIR / f"{symbol}.pkl"
 
 
+def _fetch_bars_live(symbol: str, days: int) -> pd.DataFrame | None:
+    """Try Angel One first, fall back to yfinance."""
+    try:
+        import angel_one as _ao
+        if _ao.is_configured():
+            df = _ao.fetch_5min(symbol, days=days)
+            if df is not None and not df.empty:
+                return df
+    except Exception:
+        pass
+    from intraday_model_v2 import fetch_5min
+    return fetch_5min(symbol, days=days)
+
+
+def _fetch_nifty_live(days: int) -> pd.DataFrame | None:
+    """Try Angel One first, fall back to yfinance."""
+    try:
+        import angel_one as _ao
+        if _ao.is_configured():
+            df = _ao.fetch_nifty_5min(days=days)
+            if df is not None and not df.empty:
+                return df
+    except Exception:
+        pass
+    from intraday_model_v2 import fetch_nifty_5min
+    return fetch_nifty_5min(days=days)
+
+
 def get_bars(symbol: str, days: int = 5, force: bool = False) -> pd.DataFrame | None:
-    """Return 5-min bars, from cache if fresh, else fetch from yfinance and cache."""
+    """Return 5-min bars, from cache if fresh, else fetch (Angel One → yfinance) and cache."""
     path = _cache_path(symbol)
 
     if not force and path.exists():
@@ -48,13 +79,11 @@ def get_bars(symbol: str, days: int = 5, force: bool = False) -> pd.DataFrame | 
         except Exception:
             pass
 
-    from intraday_model_v2 import fetch_5min
-    df = fetch_5min(symbol, days=days)
+    df = _fetch_bars_live(symbol, days=days)
     if df is not None and not df.empty:
         try:
             with _LOCK:
                 with open(path, "wb") as f:
-                    # Also drop cached features on new bar data
                     fp = _feat_path(symbol)
                     if fp.exists():
                         fp.unlink()
@@ -99,7 +128,7 @@ def get_features(symbol: str, days: int = 5) -> "pd.DataFrame | None":
 
 
 def get_nifty_bars(days: int = 5, force: bool = False) -> pd.DataFrame | None:
-    """Return Nifty 5-min bars, cached."""
+    """Return Nifty 5-min bars, cached (Angel One → yfinance)."""
     path = _CACHE_DIR / "NIFTY50_5m.pkl"
 
     if not force and path.exists():
@@ -112,8 +141,7 @@ def get_nifty_bars(days: int = 5, force: bool = False) -> pd.DataFrame | None:
         except Exception:
             pass
 
-    from intraday_model_v2 import fetch_nifty_5min
-    df = fetch_nifty_5min(days=days)
+    df = _fetch_nifty_live(days=days)
     if df is not None and not df.empty:
         try:
             with _LOCK:

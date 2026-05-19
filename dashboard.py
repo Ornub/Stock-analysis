@@ -2744,7 +2744,7 @@ with tab4:
   </div>
 </div>""", unsafe_allow_html=True)
 
-        # ── Row 5: Intraday Intelligence (yfinance free, or Zerodha if configured) ─
+        # ── Row 5: Intraday Intelligence (Angel One > Zerodha > yfinance) ──────────
         _zerodha_ready = False
         try:
             from zerodha_data.config import api_key as _zk
@@ -2752,7 +2752,19 @@ with tab4:
         except Exception:
             pass
 
-        _intra_src = "Zerodha · live" if _zerodha_ready else "yfinance · ~15-min delay"
+        _angel_ready = False
+        try:
+            import angel_one as _ao_chk
+            _angel_ready = _ao_chk.is_configured()
+        except Exception:
+            pass
+
+        if _angel_ready:
+            _intra_src = "Angel One · real-time"
+        elif _zerodha_ready:
+            _intra_src = "Zerodha · live"
+        else:
+            _intra_src = "yfinance · ~15-min delay"
         with st.expander("Intraday Intelligence", expanded=True):
             st.markdown(
                 f"<div style='font-size:0.72rem;color:#64748b;margin-bottom:10px'>"
@@ -2917,7 +2929,7 @@ with tab5:
         f"color:{'#15803d' if _alerts_on else '#94a3b8'};border-radius:3px;"
         f"padding:1px 6px;font-weight:600'>"
         f"{'🔔 Alerts ON' if _alerts_on else '🔕 Alerts OFF'}</span>"
-        f"{'&nbsp; Telegram/WhatsApp alerts active' if _alerts_on else '&nbsp; Add TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to .env to enable'}"
+        f"{'&nbsp; WhatsApp alerts active' if _alerts_on else '&nbsp; Add WHATSAPP_PHONE + WHATSAPP_APIKEY to .env to enable'}"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -2925,7 +2937,7 @@ with tab5:
         try:
             from telegram_alert import test as _tg_test
             _tg_test()
-            st.toast("Test message sent — check Telegram/WhatsApp")
+            st.toast("Test message sent — check WhatsApp")
         except Exception as _ae:
             st.error(str(_ae))
 
