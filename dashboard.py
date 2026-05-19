@@ -2917,29 +2917,44 @@ with tab5:
 
     _cache_key = "intraday_scan_df"
     if _do_scan or _cache_key not in st.session_state:
-        with st.spinner(f"Scanning {len(_scan_symbols)} symbols…"):
+        with st.spinner(f"Scanning {len(_scan_symbols)} symbols in parallel…"):
             _scan_result = scan_intraday(_scan_symbols, use_ml=False)
             if _ml_ready and not _scan_result.empty:
                 try:
                     import intraday_model_v3 as _imv3
-                    _v4_rows = []
-                    for _sv4 in _scan_result["symbol"].tolist():
-                        try:
-                            _rv4 = _imv3.predict(_sv4)
-                            _v4_rows.append({
-                                "symbol":     _sv4,
-                                "v4_signal":  _rv4.get("signal",    "HOLD"),
-                                "v4_premium": _rv4.get("premium",   False),
-                                "v4_stage2":  _rv4.get("stage2",    "HOLD"),
-                                "v4_dir_p":   round(_rv4.get("dir_proba",  0.0), 3),
-                                "v4_meta_p":  round(_rv4.get("meta_proba", 0.0), 3),
-                                "v4_hold_p":  round(_rv4.get("hold_proba", 0.0), 3),
-                            })
-                        except Exception:
-                            _v4_rows.append({"symbol": _sv4, "v4_signal": "HOLD",
-                                             "v4_premium": False, "v4_stage2": "HOLD",
-                                             "v4_dir_p": 0.0, "v4_meta_p": 0.0, "v4_hold_p": 0.0})
-                    _scan_result = _scan_result.merge(pd.DataFrame(_v4_rows), on="symbol", how="left")
+                    # Parallel predict — all symbols fetched concurrently
+                    _v4_preds = _imv3.batch_predict_parallel(
+                        _scan_result["symbol"].tolist(), max_workers=10
+                    )
+                    _v4_rows = [
+                        {
+                            "symbol":     _sv4,
+                            "v4_signal":  _rv4.get("signal",    "HOLD"),
+                            "v4_premium": _rv4.get("premium",   False),
+                            "v4_stage2":  _rv4.get("stage2",    "HOLD"),
+                            "v4_dir_p":   round(_rv4.get("dir_proba",  0.0), 3),
+                            "v4_meta_p":  round(_rv4.get("meta_proba", 0.0), 3),
+                            "v4_hold_p":  round(_rv4.get("hold_proba", 0.0), 3),
+                        }
+                        for _sv4, _rv4 in _v4_preds.items()
+                    ]
+                    _scan_result = _scan_result.merge(
+                        pd.DataFrame(_v4_rows), on="symbol", how="left"
+                    )
+                    # Auto-log any new signals (deduplicated within 30 min)
+                    try:
+                        import signal_log as _slog
+                        for _sv4, _rv4 in _v4_preds.items():
+                            if _rv4.get("signal", "HOLD") != "HOLD" and _rv4.get("data_ok", True):
+                                _slog.log_signal(
+                                    symbol=_sv4,
+                                    signal=_rv4["signal"],
+                                    premium=bool(_rv4.get("premium", False)),
+                                    dir_p=float(_rv4.get("dir_proba", 0.0)),
+                                    meta_p=float(_rv4.get("meta_proba", 0.0)),
+                                )
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             st.session_state[_cache_key] = _scan_result
@@ -3219,6 +3234,67 @@ with tab5:
                     st.plotly_chart(_cfig, use_container_width=True)
                 else:
                     st.caption("No 5-min data available for today.")
+
+        # ── Signal Log ────────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Signal Log")
+        try:
+            import signal_log as _slog
+            _log_c1, _log_c2 = st.columns([3, 1])
+            with _log_c2:
+                if st.button("Mark outcomes", use_container_width=True,
+                             help="Auto-fetch current prices and mark WIN/LOSS for pending signals"):
+                    try:
+                        _updated = _slog.auto_update_outcomes()
+                        st.success(f"Updated {_updated} signal(s)")
+                    except Exception as _oe:
+                        st.error(str(_oe))
+
+            _log_summary = _slog.summary()
+            _ls1, _ls2, _ls3, _ls4 = st.columns(4)
+            _ls1.metric("Total logged",  _log_summary["total"])
+            _ls2.metric("Pending",       _log_summary["pending"])
+            _ls3.metric("Wins / Losses", f"{_log_summary['wins']} / {_log_summary['losses']}")
+            _ls4.metric("Win rate",
+                        f"{_log_summary['win_rate']:.0%}" if _log_summary["win_rate"] is not None else "—")
+
+            _log_df = _slog.get_recent(40)
+            if _log_df.empty:
+                st.caption("No signals logged yet — run a scan during market hours.")
+            else:
+                def _style_log(row):
+                    styles = []
+                    for col in row.index:
+                        if col == "signal":
+                            styles.append("color:#15803d;font-weight:700" if row["signal"] == "BUY"
+                                          else "color:#b91c1c;font-weight:700")
+                        elif col == "outcome":
+                            v = row.get("outcome")
+                            styles.append(
+                                "color:#15803d;font-weight:700" if v == "WIN"
+                                else ("color:#b91c1c;font-weight:700" if v == "LOSS"
+                                      else "color:#94a3b8")
+                            )
+                        elif col == "premium":
+                            styles.append("color:#d97706;font-weight:700" if row.get("premium") else "color:#94a3b8")
+                        else:
+                            styles.append("color:#CBD5E1")
+                    return styles
+
+                _log_show_cols = ["ts", "symbol", "signal", "premium", "dir_p",
+                                  "meta_p", "entry_price", "outcome", "exit_price"]
+                _log_show_cols = [c for c in _log_show_cols if c in _log_df.columns]
+                _log_fmt = {"dir_p": "{:.0%}", "meta_p": "{:.0%}",
+                            "entry_price": "₹{:,.1f}", "exit_price": "₹{:,.1f}"}
+                st.dataframe(
+                    _log_df[_log_show_cols].style
+                    .apply(_style_log, axis=1)
+                    .format({k: v for k, v in _log_fmt.items() if k in _log_show_cols},
+                            na_rep="—"),
+                    use_container_width=True, height=240,
+                )
+        except Exception:
+            st.caption("Signal log unavailable.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

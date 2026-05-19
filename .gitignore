@@ -4,3 +4,5 @@ __pycache__/
 
 # News cache (refreshed at runtime)
 data/news_cache.json
+data/cache/
+data/signal_log.db

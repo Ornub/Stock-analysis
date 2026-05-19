@@ -52,6 +52,23 @@ from intraday_model_v2 import (
     _make_lgbm_dir, _make_lgbm_hold,
 )
 
+# ── Module-level model cache (loaded once, shared across threads) ─────────────
+_BLOB_CACHE: dict | None = None
+_BLOB_LOCK  = __import__("threading").Lock()
+
+
+def _load_blob() -> dict:
+    """Load the v4 pkl once and keep it in module memory. Thread-safe."""
+    global _BLOB_CACHE
+    if _BLOB_CACHE is None:
+        with _BLOB_LOCK:
+            if _BLOB_CACHE is None:
+                import __main__
+                from swing_v2 import LGBMEnsemble
+                __main__.LGBMEnsemble = LGBMEnsemble
+                _BLOB_CACHE = joblib.load(MODEL_PATH_V3)
+    return _BLOB_CACHE
+
 # ── Config ──────────────────────────────────────────────────────────────────
 MODEL_PATH_V3   = Path("models/intraday_v3.pkl")
 
@@ -568,7 +585,7 @@ def predict(symbol: str) -> dict:
     if not MODEL_PATH_V3.exists():
         return {"error": f"Model not found: {MODEL_PATH_V3}"}
 
-    blob = joblib.load(MODEL_PATH_V3)
+    blob = _load_blob()
     models_dir    = blob["models_dir"]
     model_hold    = blob["model_hold"]
     meta_buy_m    = blob.get("meta_buy_model")
@@ -583,13 +600,15 @@ def predict(symbol: str) -> dict:
     hold_thr      = blob.get("hold_threshold",     HOLD_THRESHOLD)
     pre_flt       = blob.get("base_pre_filter",    BASE_PRE_FILTER)
 
-    df = fetch_5min(symbol, days=5)
-    if df is None or len(df) < 40:
-        return {"signal": "HOLD", "error": "no data", "data_ok": False}
+    try:
+        from data_cache import get_features
+        feats = get_features(symbol, days=5)
+    except ImportError:
+        df = fetch_5min(symbol, days=5)
+        feats = compute_features_v3(df) if df is not None and len(df) >= 40 else None
 
-    feats = compute_features_v3(df)
     if feats is None or feats.empty:
-        return {"signal": "HOLD", "error": "feature error", "data_ok": False}
+        return {"signal": "HOLD", "error": "no data / feature error", "data_ok": False}
 
     X = feats[feat_cols].tail(1)
     if X.isna().any().any():
@@ -641,6 +660,31 @@ def predict(symbol: str) -> dict:
         "sell_thr":     round(sell_thr, 3),
         "data_ok":      True,
     }
+
+
+def batch_predict_parallel(symbols: list[str], max_workers: int = 10) -> dict[str, dict]:
+    """
+    Run predict() for all symbols in parallel using a thread pool.
+    Returns {symbol: result_dict}. Never raises — errors appear as HOLD signals.
+
+    max_workers=10 is a safe default; yfinance handles ~10 concurrent requests
+    without rate-limiting. Increase to 15-20 on fast connections.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(predict, sym): sym for sym in symbols}
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                results[sym] = future.result()
+            except Exception as exc:
+                results[sym] = {"signal": "HOLD", "error": str(exc),
+                                "data_ok": False, "dir_proba": 0.0,
+                                "meta_proba": 0.0, "hold_proba": 0.0,
+                                "premium": False, "stage2": "HOLD"}
+    return results
+
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
