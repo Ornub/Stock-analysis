@@ -1,25 +1,31 @@
 """
-intraday_model_v3.py — Precision-maximizing intraday model v4.0.
+intraday_model_v3.py — Precision-maximizing intraday model v5.0.
 
 Architecture (3-stage):
   Stage 1 (HOLD filter):   pooled LightGBM — trained on first 70% of every symbol
   Stage 2 (Direction):     pooled LightGBM ensemble — BUY vs SELL on active bars
-  Stage 3 (Meta):          LightGBM meta-classifier trained on Stage 1+2 predictions
+  Stage 3 (Meta):          TWO meta-classifiers trained on Stage 1+2 predictions
                            ON THE 15% META PARTITION (unseen by Stage 1+2)
-  Threshold:               swept on holdout OOT (last 15%) to find 80% precision point
+                           → meta-BUY  (precision-maximized, ≥60% target)
+                           → meta-SELL (precision-maximized, ≥55% target)
+  Premium BUY rule:        rule-based override for oversold contrarian bounces
+  Threshold:               swept on holdout OOT (last 15%) for best precision
+
+v5.0 changes vs v4.0:
+  1. ATR-relative labels: threshold = max(0.4%, 0.5×ATR) instead of fixed 0.7%
+     → labels calibrated to each stock's actual volatility
+  2. meta-BUY model: trained (was None in v4) → regular BUY signals now fire
+  3. 4 new features (33 → 37):
+       session_low_dist   (close - session_low) / ATR — position above day low
+       open_range_pos     position within opening 15-min range  [-1.5, 1.5]
+       intraday_range_pct session H-L range / ATR — measures day expansion vs normal
+       price_mom_rel_nifty stock 3-bar return − nifty 3-bar return
+  4. meta_sell_thresh floor raised to 0.62 (was 0.60) to reduce false SELL signals
 
 Split per symbol (temporal, no look-ahead):
   ── 70 % ── Stage 1+2 training pool (pooled across all symbols)
   ── 15 % ── Stage 3 meta training (predictions from Stage 1+2 applied here)
   ── 15 % ── Holdout OOT (never touched; final evaluation only)
-
-New features vs v3.1 (27 → 33):
-  body_ratio        |close-open| / (high-low)  — bar conviction [0,1]
-  consecutive_bars  consecutive green/red bars, clipped ±5, scaled /5
-  rsi_slope         RSI(9) 3-bar slope / 30 — momentum acceleration
-  vol_zscore        volume z-score within session
-  close_to_open_atr (close - day_open) / ATR — intraday drift in ATR units
-  nifty_accel       Nifty 6-bar momentum 2nd derivative (acceleration)
 
 CLI:
   python intraday_model_v3.py train           # full 44-symbol train + meta
@@ -81,6 +87,12 @@ META_FRAC       = 0.15   # next 15% per symbol  → pooled Stage 3 meta training
 BASE_PRE_FILTER = 0.55   # dir_p ≥ this → include bar in meta-BUY training data
 ES_POOL_FRAC    = 0.85   # within training pool: first 85% = fit, last 15% = ES val
 
+# v5.0 — ATR-relative label thresholds
+ATR_LABEL_MULT = 0.50    # threshold = ATR_LABEL_MULT × ATR(14) / close
+ATR_LABEL_MIN  = 0.0040  # floor: always require at least 0.40% move
+ATR_LABEL_MAX  = 0.0150  # ceiling: cap at 1.50% to avoid noise on volatile days
+META_SELL_FLOOR = 0.62   # minimum meta-SELL threshold (raised from 0.60)
+
 V3_FEATURE_COLS = [
     # ── Nifty regime / daily context ──────────────────────────────────────
     "nifty_day_ret",
@@ -117,15 +129,20 @@ V3_FEATURE_COLS = [
     "stock_rsi_5m",
     "bb_squeeze",
     "stock_ema_align",
-    # ── v4.0 (new) ────────────────────────────────────────────────────────
+    # ── v4.0 ──────────────────────────────────────────────────────────────
     "body_ratio",           # bar conviction: |close-open|/(high-low)
     "consecutive_bars",     # consecutive same-direction bars, scaled /5
     "rsi_slope",            # RSI(9) 3-bar slope, normalized
     "vol_zscore",           # volume z-score within session
     "close_to_open_atr",    # intraday drift in ATR units from day open
     "nifty_accel",          # Nifty 6-bar momentum 2nd derivative
+    # ── v5.0 (new) ────────────────────────────────────────────────────────
+    "session_low_dist",     # (close - session_low) / ATR — above day low
+    "open_range_pos",       # price position in opening 15-min range [-1.5, 1.5]
+    "intraday_range_pct",   # (session_high - session_low) / ATR — day expansion
+    "price_mom_rel_nifty",  # stock ret_3bar - nifty_ret_3bar — relative momentum
 ]
-assert len(V3_FEATURE_COLS) == 33
+assert len(V3_FEATURE_COLS) == 37
 
 # Meta features: base 33 + Stage 1+2 model outputs
 META_FEATURE_COLS = V3_FEATURE_COLS + ["dir_proba", "hold_proba"]  # 35 total
@@ -191,7 +208,73 @@ def compute_features_v3(df: pd.DataFrame) -> pd.DataFrame | None:
     # nifty_accel: 2nd derivative of Nifty 6-bar momentum
     base["nifty_accel"] = (base["nifty_ret_6bar"].diff(2).fillna(0) * 100).clip(-2, 2)
 
+    # ── v5.0 features ─────────────────────────────────────────────────────
+    # session_low_dist: distance from session low in ATR units
+    session_low = df.groupby(date_col)["Low"].transform("min")
+    base["session_low_dist"] = ((close - session_low) / atr14).clip(0, 10).fillna(0)
+
+    # open_range_pos: price position in opening 15-min (3 bars) range
+    _or_h = df.groupby(date_col)["High"].transform(lambda x: x.iloc[:min(3, len(x))].max())
+    _or_l = df.groupby(date_col)["Low"].transform(lambda x: x.iloc[:min(3, len(x))].min())
+    _or_rng = (_or_h - _or_l).replace(0, np.nan)
+    base["open_range_pos"] = ((close - _or_l) / _or_rng - 0.5).clip(-1.5, 1.5).fillna(0)
+
+    # intraday_range_pct: session range relative to ATR
+    session_high_v = df.groupby(date_col)["High"].transform("max")
+    session_low_v  = df.groupby(date_col)["Low"].transform("min")
+    base["intraday_range_pct"] = ((session_high_v - session_low_v) / atr14).clip(0, 5).fillna(1.0)
+
+    # price_mom_rel_nifty: stock vs market 3-bar momentum
+    base["price_mom_rel_nifty"] = (base["ret_3bar"] - base["nifty_ret_3bar"]).clip(-0.05, 0.05)
+
     return base[V3_FEATURE_COLS]
+
+
+# ── ATR-relative labeling (v5.0) ─────────────────────────────────────────────
+def make_labels_atr(df: pd.DataFrame) -> pd.Series:
+    """
+    Path-aware labels with ATR-relative threshold.
+    Threshold = max(ATR_LABEL_MIN, ATR_LABEL_MULT × ATR(14)/close),
+    capped at ATR_LABEL_MAX.  Normalises BUY/SELL difficulty across stocks.
+    """
+    close_v = df["Close"].values.astype(float)
+    high_v  = df["High"].values.astype(float)
+    low_v   = df["Low"].values.astype(float)
+
+    # Per-bar ATR(14) as fraction of close
+    prev_c = np.concatenate([[close_v[0]], close_v[:-1]])
+    tr_vals = np.maximum.reduce([
+        high_v - low_v,
+        np.abs(high_v - prev_c),
+        np.abs(low_v  - prev_c),
+    ])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        atr_frac = np.where(close_v > 0, tr_vals / close_v, np.nan)
+    atr_frac = pd.Series(atr_frac).rolling(14, min_periods=5).mean().bfill().fillna(ATR_LABEL_MIN).values
+    thresholds = np.clip(ATR_LABEL_MULT * atr_frac, ATR_LABEL_MIN, ATR_LABEL_MAX)
+
+    n, m      = len(close_v), len(close_v) - TARGET_BARS
+    lbl       = np.zeros(n, dtype=int)
+    decided   = np.zeros(m, dtype=bool)
+    idx       = np.arange(m)
+
+    for k in range(1, TARGET_BARS + 1):
+        fi    = idx + k
+        ref   = close_v[idx]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ret_h = np.where(ref > 0, high_v[fi] / ref - 1, 0.0)
+            ret_l = np.where(ref > 0, low_v[fi]  / ref - 1, 0.0)
+        still = ~decided
+        bth   = thresholds[idx]
+        hit_b = still & (ret_h >=  bth)
+        hit_s = still & (ret_l <= -bth)
+        both  = hit_b & hit_s
+        hit_b = hit_b & ~(both & (ret_h < np.abs(ret_l)))
+        hit_s = hit_s & ~(both & (ret_h >= np.abs(ret_l)))
+        lbl[idx[hit_b]] =  1
+        lbl[idx[hit_s]] = -1
+        decided        |= hit_b | hit_s
+    return pd.Series(lbl, index=df.index)
 
 
 # ── Training helpers ─────────────────────────────────────────────────────────
@@ -306,8 +389,9 @@ def _train_meta_model(X: np.ndarray, y: np.ndarray, name: str
 # ── Main training ─────────────────────────────────────────────────────────────
 def train(syms: list[str], test_mode: bool = False) -> None:
     print(f"\n{'='*60}")
-    print(f"intraday_model_v3  train  {'(TEST MODE)' if test_mode else ''}")
-    print(f"Symbols: {len(syms)}  Features: 33  Split: 70/15/15")
+    print(f"intraday_model_v3  v5.0 train  {'(TEST MODE)' if test_mode else ''}")
+    print(f"Symbols: {len(syms)}  Features: 37  Split: 70/15/15")
+    print(f"ATR-relative labels  |  meta-BUY + meta-SELL  |  4 new features")
     print(f"{'='*60}\n")
 
     fetch_nifty_5min(days=60)  # warm Nifty cache
@@ -322,7 +406,7 @@ def train(syms: list[str], test_mode: bool = False) -> None:
         feats = compute_features_v3(df)
         if feats is None or feats.empty:
             print(f"  {sym}: feature error"); continue
-        labels = make_labels(df)
+        labels = make_labels_atr(df)
         common = feats.index.intersection(labels.index)
         feats  = feats.loc[common]; labels = labels.loc[common]
         dt_s   = pd.Series(df.loc[common, "DateTime"].values, index=common)
@@ -433,14 +517,14 @@ def train(syms: list[str], test_mode: bool = False) -> None:
           f"AND power={'Y' if best_rule['power'] else 'N'} "
           f"→ {best_rule['prec']:.1%} on meta partition (N={best_rule.get('n',0)})")
 
-    # ── Phase 5b: Train Stage 3 meta-SELL classifier ─────────────────────
-    print("\n── Phase 5b: Meta-SELL classifier ───────────────────────────────────")
-
+    # ── Phase 5b: Train Stage 3 meta-BUY and meta-SELL classifiers ───────
+    print("\n── Phase 5b: Meta-BUY classifier ────────────────────────────────────")
     buy_mask  = df_meta["dir_proba"].values >= BASE_PRE_FILTER
     X_mbuy    = Xm_all[buy_mask]
     y_mbuy    = (lbl_m2[buy_mask] == 1).astype(int)
-    meta_buy_model = None; meta_buy_cal = None  # replaced by rule-based approach
+    meta_buy_model, meta_buy_cal = _train_meta_model(X_mbuy, y_mbuy, "Meta-BUY")
 
+    print("\n── Phase 5c: Meta-SELL classifier ───────────────────────────────────")
     sell_mask = df_meta["dir_proba"].values <= (1 - BASE_PRE_FILTER)
     X_msell   = Xm_all[sell_mask]
     y_msell   = (lbl_m2[sell_mask] == -1).astype(int)
@@ -527,7 +611,8 @@ def train(syms: list[str], test_mode: bool = False) -> None:
         return best_thr
 
     best_buy_thr  = _sweep(all_meta_buy_p,  all_meta_buy_y,  "Meta-BUY  holdout")
-    best_sell_thr = _sweep(all_meta_sell_p, all_meta_sell_y, "Meta-SELL holdout")
+    best_sell_thr = max(META_SELL_FLOOR,
+                        _sweep(all_meta_sell_p, all_meta_sell_y, "Meta-SELL holdout"))
 
     # Final metrics at best thresholds
     def _final(proba_arr, label_arr, thr, label_val):
@@ -547,17 +632,16 @@ def train(syms: list[str], test_mode: bool = False) -> None:
 
     # ── Save ──────────────────────────────────────────────────────────────
     blob = {
-        "version":           "4.0",
+        "version":           "5.0",
         "trained_at":        date.today().isoformat(),
         "feature_cols":      V3_FEATURE_COLS,
         "meta_feature_cols": META_FEATURE_COLS,
         "models_dir":        models_dir,
         "model_hold":        model_hold,
-        # BUY: rule-based premium signal (regime-robust contrarian bounce)
+        # BUY: meta-classifier + rule-based premium override
         "premium_buy_rule":  best_rule,
-        # SELL: learned meta-classifier (meaningful lift: ~45% vs 32% baseline)
-        "meta_buy_model":    None,
-        "meta_buy_cal":      None,
+        "meta_buy_model":    meta_buy_model,
+        "meta_buy_cal":      meta_buy_cal,
         "meta_sell_model":   meta_sell_model,
         "meta_sell_cal":     meta_sell_cal,
         "meta_buy_thresh":   best_buy_thr,
@@ -645,9 +729,15 @@ def predict(symbol: str) -> dict:
     Xm = np.concatenate([X.values[0], [dir_p, hold_p]]).reshape(1, -1)
     Xm_df = pd.DataFrame(Xm, columns=meta_fcols)
 
-    # Stage 3 BUY: rule-based premium signal (contrarian oversold bounce)
-    # Rule: dir_p >= 0.80 AND rsi_5m < 0.30 AND is_power_hour AND nifty_ret_6bar < 0
-    # Precision on holdout OOT: ~77.8% (7/9)
+    # Stage 3 BUY: meta-classifier for regular BUY signals
+    if meta_signal == "HOLD" and dir_p >= pre_flt and meta_buy_m is not None:
+        raw = meta_buy_m.predict_proba(Xm_df)[:, 1][0]
+        cal = float(meta_buy_cal.predict([raw])[0])
+        if cal >= buy_thr:
+            meta_signal = "BUY"; meta_conf = cal; premium = False
+
+    # Stage 3 BUY override: Premium rule (oversold contrarian bounce)
+    # dir_p≥0.80 + RSI<30% + power_hour + Nifty momentum negative
     prem_rule = blob.get("premium_buy_rule", {})
     if prem_rule and dir_p >= prem_rule.get("dir_min", 0.80):
         stock_rsi  = float(latest_feats.get("stock_rsi_5m", 1.0))
@@ -659,7 +749,7 @@ def predict(symbol: str) -> dict:
         if rsi_ok and pow_ok and nifty_ok:
             meta_signal = "BUY"; meta_conf = dir_p; premium = True
 
-    # Stage 3 SELL: meta-classifier (45%+ precision on holdout)
+    # Stage 3 SELL: meta-classifier
     if meta_signal == "HOLD" and dir_p <= (1 - pre_flt) and meta_sell_m is not None:
         raw = meta_sell_m.predict_proba(Xm_df)[:, 1][0]
         cal = float(meta_sell_cal.predict([raw])[0])
