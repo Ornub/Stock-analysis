@@ -1,38 +1,32 @@
 """
-intraday_model_v3.py — Precision-maximizing intraday model v5.0.
+intraday_model_v3.py -- Precision-maximizing intraday model v6.0.
 
 Architecture (3-stage):
-  Stage 1 (HOLD filter):   pooled LightGBM — trained on first 70% of every symbol
-  Stage 2 (Direction):     pooled LightGBM ensemble — BUY vs SELL on active bars
-  Stage 3 (Meta):          TWO meta-classifiers trained on Stage 1+2 predictions
-                           ON THE 15% META PARTITION (unseen by Stage 1+2)
-                           → meta-BUY  (precision-maximized, ≥60% target)
-                           → meta-SELL (precision-maximized, ≥55% target)
-  Premium BUY rule:        rule-based override for oversold contrarian bounces
-  Threshold:               swept on holdout OOT (last 15%) for best precision
+  Stage 1 (HOLD filter):   pooled LightGBM -- trained on first 70% of every symbol
+  Stage 2 (Direction):     pooled LightGBM ensemble (5 000 est) -- BUY vs SELL
+  Stage 3 (Meta):          TWO meta-classifiers + TWO rule-based premium overrides
+                           -> meta-BUY  / Premium BUY rule
+                           -> meta-SELL / Premium SELL rule (new in v6)
+  Threshold:               fine-grained 0.01-step sweep on holdout OOT
 
-v5.0 changes vs v4.0:
-  1. ATR-relative labels: threshold = max(0.4%, 0.5×ATR) instead of fixed 0.7%
-     → labels calibrated to each stock's actual volatility
-  2. meta-BUY model: trained (was None in v4) → regular BUY signals now fire
-  3. 4 new features (33 → 37):
-       session_low_dist   (close - session_low) / ATR — position above day low
-       open_range_pos     position within opening 15-min range  [-1.5, 1.5]
-       intraday_range_pct session H-L range / ATR — measures day expansion vs normal
-       price_mom_rel_nifty stock 3-bar return − nifty 3-bar return
-  4. meta_sell_thresh floor raised to 0.62 (was 0.60) to reduce false SELL signals
+v6.0 changes vs v5.0:
+  1. Asymmetric ATR labels: BUY = 0.5*ATR, SELL = 0.7*ATR
+     -> SELL requires a larger genuine move; cleanses noisy SELL labels
+  2. Direction ensemble: n_estimators 3 000 -> 5 000 (was hitting ceiling)
+  3. 5 new features (37 -> 42):
+       candle_upper_shadow  upper wick / range -- rejection candle (bearish)
+       candle_lower_shadow  lower wick / range -- buying tail (bullish)
+       vwap_slope           VWAP deviation 3-bar rate-of-change
+       vol_up_frac          session up-bar volume fraction − 0.5
+       price_accel          2nd derivative of ret_3bar -- momentum acceleration
+  4. Premium SELL rule: overbought contrarian short (analogous to Premium BUY)
+  5. Meta-SELL trained with FP-penalty weighting (false-positive cost = 1.5*)
+  6. Fine-grained threshold sweep (0.01 steps) + MIN_SIGNALS=25 floor on SELL
 
 Split per symbol (temporal, no look-ahead):
-  ── 70 % ── Stage 1+2 training pool (pooled across all symbols)
-  ── 15 % ── Stage 3 meta training (predictions from Stage 1+2 applied here)
-  ── 15 % ── Holdout OOT (never touched; final evaluation only)
-
-CLI:
-  python intraday_model_v3.py train           # full 44-symbol train + meta
-  python intraday_model_v3.py train --test    # quick 12-symbol test
-  python intraday_model_v3.py predict SYMBOL  # 3-stage prediction
-  python intraday_model_v3.py verify          # holdout replay
-  python intraday_model_v3.py threshold       # precision-recall curve
+  ── 70 % ── Stage 1+2 training pool
+  ── 15 % ── Stage 3 meta training
+  ── 15 % ── Holdout OOT (never touched)
 """
 
 from __future__ import annotations
@@ -80,18 +74,21 @@ MODEL_PATH_V3   = Path("models/intraday_v3.pkl")
 
 REGIME_THRESHOLD = 0.015   # 1.5% Nifty day move suppresses opposite-direction signals
 
-TRAIN_FRAC      = 0.70   # first 70% per symbol → pooled Stage 1+2 training
-META_FRAC       = 0.15   # next 15% per symbol  → pooled Stage 3 meta training
+TRAIN_FRAC      = 0.70   # first 70% per symbol -> pooled Stage 1+2 training
+META_FRAC       = 0.15   # next 15% per symbol  -> pooled Stage 3 meta training
 # Holdout = last 15% per symbol
 
-BASE_PRE_FILTER = 0.55   # dir_p ≥ this → include bar in meta-BUY training data
+BASE_PRE_FILTER = 0.55   # dir_p ≥ this -> include bar in meta-BUY training data
 ES_POOL_FRAC    = 0.85   # within training pool: first 85% = fit, last 15% = ES val
 
-# v5.0 — ATR-relative label thresholds
-ATR_LABEL_MULT = 0.50    # threshold = ATR_LABEL_MULT × ATR(14) / close
+# v6.0 -- asymmetric ATR label thresholds
+BUY_ATR_MULT   = 0.50    # BUY  requires  ≥ 0.5*ATR upside move
+SELL_ATR_MULT  = 0.70    # SELL requires  ≥ 0.7*ATR downside move (harder -> cleaner labels)
 ATR_LABEL_MIN  = 0.0040  # floor: always require at least 0.40% move
-ATR_LABEL_MAX  = 0.0150  # ceiling: cap at 1.50% to avoid noise on volatile days
-META_SELL_FLOOR = 0.62   # minimum meta-SELL threshold (raised from 0.60)
+ATR_LABEL_MAX  = 0.0150  # ceiling: cap at 1.50%
+META_SELL_FLOOR = 0.62   # minimum meta-SELL threshold
+FP_PENALTY     = 1.50    # false-positive cost multiplier in meta-SELL training
+MIN_SELL_SIGS  = 25      # minimum holdout signals required when sweeping SELL threshold
 
 V3_FEATURE_COLS = [
     # ── Nifty regime / daily context ──────────────────────────────────────
@@ -136,13 +133,19 @@ V3_FEATURE_COLS = [
     "vol_zscore",           # volume z-score within session
     "close_to_open_atr",    # intraday drift in ATR units from day open
     "nifty_accel",          # Nifty 6-bar momentum 2nd derivative
-    # ── v5.0 (new) ────────────────────────────────────────────────────────
-    "session_low_dist",     # (close - session_low) / ATR — above day low
+    # ── v5.0 ──────────────────────────────────────────────────────────────
+    "session_low_dist",     # (close - session_low) / ATR -- above day low
     "open_range_pos",       # price position in opening 15-min range [-1.5, 1.5]
-    "intraday_range_pct",   # (session_high - session_low) / ATR — day expansion
-    "price_mom_rel_nifty",  # stock ret_3bar - nifty_ret_3bar — relative momentum
+    "intraday_range_pct",   # (session_high - session_low) / ATR -- day expansion
+    "price_mom_rel_nifty",  # stock ret_3bar - nifty_ret_3bar -- relative momentum
+    # ── v6.0 (new) ────────────────────────────────────────────────────────
+    "candle_upper_shadow",  # upper wick / range -- rejection of higher prices (bearish)
+    "candle_lower_shadow",  # lower wick / range -- buying tail (bullish)
+    "vwap_slope",           # VWAP deviation 3-bar rate of change
+    "vol_up_frac",          # session up-bar volume fraction − 0.5
+    "price_accel",          # 2nd derivative of ret_3bar -- momentum acceleration
 ]
-assert len(V3_FEATURE_COLS) == 37
+assert len(V3_FEATURE_COLS) == 42
 
 # Meta features: base 33 + Stage 1+2 model outputs
 META_FEATURE_COLS = V3_FEATURE_COLS + ["dir_proba", "hold_proba"]  # 35 total
@@ -227,22 +230,48 @@ def compute_features_v3(df: pd.DataFrame) -> pd.DataFrame | None:
     # price_mom_rel_nifty: stock vs market 3-bar momentum
     base["price_mom_rel_nifty"] = (base["ret_3bar"] - base["nifty_ret_3bar"]).clip(-0.05, 0.05)
 
+    # ── v6.0 features ─────────────────────────────────────────────────────
+    _bar_rng = (high - low).replace(0, np.nan)
+    # candle_upper_shadow: upper wick proportion -- rejection of higher prices
+    base["candle_upper_shadow"] = (
+        (high - pd.concat([close, open_], axis=1).max(axis=1)) / _bar_rng
+    ).clip(0, 1).fillna(0)
+    # candle_lower_shadow: lower wick proportion -- buying tail
+    base["candle_lower_shadow"] = (
+        (pd.concat([close, open_], axis=1).min(axis=1) - low) / _bar_rng
+    ).clip(0, 1).fillna(0)
+
+    # vwap_slope: 3-bar rate-of-change of the VWAP deviation (already in base)
+    base["vwap_slope"] = (base["vwap_pct"].diff(3).fillna(0) * 100).clip(-2, 2)
+
+    # vol_up_frac: fraction of session volume in up-bars, centered at 0
+    _is_up      = (close >= open_).astype(float)
+    _vol_up_cum = ((_is_up * vol).groupby(date_col.values, group_keys=False)
+                   .cumsum())
+    _vol_cum    = (vol.groupby(date_col.values, group_keys=False).cumsum())
+    base["vol_up_frac"] = (
+        (_vol_up_cum / _vol_cum.replace(0, np.nan)) - 0.5
+    ).clip(-0.5, 0.5).fillna(0)
+
+    # price_accel: 2nd derivative of ret_3bar -- momentum acceleration
+    base["price_accel"] = (base["ret_3bar"].diff(3).fillna(0) * 100).clip(-3, 3)
+
     return base[V3_FEATURE_COLS]
 
 
 # ── ATR-relative labeling (v5.0) ─────────────────────────────────────────────
 def make_labels_atr(df: pd.DataFrame) -> pd.Series:
     """
-    Path-aware labels with ATR-relative threshold.
-    Threshold = max(ATR_LABEL_MIN, ATR_LABEL_MULT × ATR(14)/close),
-    capped at ATR_LABEL_MAX.  Normalises BUY/SELL difficulty across stocks.
+    Path-aware labels with asymmetric ATR-relative thresholds (v6.0).
+    BUY  threshold = max(ATR_LABEL_MIN, BUY_ATR_MULT  * ATR(14)/close)
+    SELL threshold = max(ATR_LABEL_MIN, SELL_ATR_MULT * ATR(14)/close)
+    SELL requires a harder move (0.7 vs 0.5 ATR mult) -- cleaner negative labels.
     """
     close_v = df["Close"].values.astype(float)
     high_v  = df["High"].values.astype(float)
     low_v   = df["Low"].values.astype(float)
 
-    # Per-bar ATR(14) as fraction of close
-    prev_c = np.concatenate([[close_v[0]], close_v[:-1]])
+    prev_c  = np.concatenate([[close_v[0]], close_v[:-1]])
     tr_vals = np.maximum.reduce([
         high_v - low_v,
         np.abs(high_v - prev_c),
@@ -251,12 +280,14 @@ def make_labels_atr(df: pd.DataFrame) -> pd.Series:
     with np.errstate(divide="ignore", invalid="ignore"):
         atr_frac = np.where(close_v > 0, tr_vals / close_v, np.nan)
     atr_frac = pd.Series(atr_frac).rolling(14, min_periods=5).mean().bfill().fillna(ATR_LABEL_MIN).values
-    thresholds = np.clip(ATR_LABEL_MULT * atr_frac, ATR_LABEL_MIN, ATR_LABEL_MAX)
 
-    n, m      = len(close_v), len(close_v) - TARGET_BARS
-    lbl       = np.zeros(n, dtype=int)
-    decided   = np.zeros(m, dtype=bool)
-    idx       = np.arange(m)
+    buy_thr  = np.clip(BUY_ATR_MULT  * atr_frac, ATR_LABEL_MIN, ATR_LABEL_MAX)
+    sell_thr = np.clip(SELL_ATR_MULT * atr_frac, ATR_LABEL_MIN, ATR_LABEL_MAX)
+
+    n, m    = len(close_v), len(close_v) - TARGET_BARS
+    lbl     = np.zeros(n, dtype=int)
+    decided = np.zeros(m, dtype=bool)
+    idx     = np.arange(m)
 
     for k in range(1, TARGET_BARS + 1):
         fi    = idx + k
@@ -265,9 +296,8 @@ def make_labels_atr(df: pd.DataFrame) -> pd.Series:
             ret_h = np.where(ref > 0, high_v[fi] / ref - 1, 0.0)
             ret_l = np.where(ref > 0, low_v[fi]  / ref - 1, 0.0)
         still = ~decided
-        bth   = thresholds[idx]
-        hit_b = still & (ret_h >=  bth)
-        hit_s = still & (ret_l <= -bth)
+        hit_b = still & (ret_h >=  buy_thr[idx])
+        hit_s = still & (ret_l <= -sell_thr[idx])
         both  = hit_b & hit_s
         hit_b = hit_b & ~(both & (ret_h < np.abs(ret_l)))
         hit_s = hit_s & ~(both & (ret_h >= np.abs(ret_l)))
@@ -278,13 +308,34 @@ def make_labels_atr(df: pd.DataFrame) -> pd.Series:
 
 
 # ── Training helpers ─────────────────────────────────────────────────────────
+def _make_lgbm_dir_v6(seed: int, col_frac: float, row_frac: float) -> lgb.LGBMClassifier:
+    """Direction model with higher capacity (5 000 est) -- v6.0."""
+    return lgb.LGBMClassifier(
+        n_estimators=5000,
+        learning_rate=0.006,
+        max_depth=6,
+        num_leaves=40,
+        min_child_samples=50,
+        feature_fraction=col_frac,
+        bagging_fraction=row_frac,
+        bagging_freq=5,
+        lambda_l1=0.2,
+        lambda_l2=2.0,
+        objective="binary",
+        metric="binary_logloss",
+        verbose=-1,
+        n_jobs=-1,
+        random_state=seed,
+    )
+
+
 def _make_lgbm_meta(seed: int) -> lgb.LGBMClassifier:
     return lgb.LGBMClassifier(
-        n_estimators=800,
-        learning_rate=0.008,
+        n_estimators=1200,
+        learning_rate=0.006,
         max_depth=5,
-        num_leaves=20,
-        min_child_samples=25,
+        num_leaves=24,
+        min_child_samples=20,
         feature_fraction=0.70,
         bagging_fraction=0.80,
         bagging_freq=5,
@@ -316,8 +367,8 @@ def _train_pooled_base(X_tr: pd.DataFrame, y_tr: pd.Series
     w_dir = y_bs.map({1: (n_b+n_s)/(2*n_b), 0: (n_b+n_s)/(2*n_s)}).values
     models_dir = []
     for seed, colf, rowf in [(42, 0.70, 0.80), (137, 0.65, 0.75), (911, 0.75, 0.85)]:
-        m = _make_lgbm_dir(seed, colf, rowf)
-        cb = lgb.early_stopping(120, verbose=False)
+        m = _make_lgbm_dir_v6(seed, colf, rowf)
+        cb = lgb.early_stopping(150, verbose=False)
         m.fit(X_bs, y_bs, sample_weight=w_dir,
               eval_set=[(X_bv, y_bv)], callbacks=[cb])
         models_dir.append(m)
@@ -349,20 +400,28 @@ def _get_probas(models_dir: list, model_hold, X: pd.DataFrame
     return dir_p, hold_p
 
 
-def _train_meta_model(X: np.ndarray, y: np.ndarray, name: str
-                      ) -> tuple | tuple[None, None]:
+def _train_meta_model(X: np.ndarray, y: np.ndarray, name: str,
+                      fp_penalty: float = 1.0) -> tuple | tuple[None, None]:
+    """
+    Train a meta-classifier.  fp_penalty > 1.0 increases cost of false positives,
+    pushing the model toward higher precision at the expense of recall.
+    """
     print(f"\n  {name}: {len(X)} rows  pos={y.sum()}  neg={(y==0).sum()}"
-          f"  base_rate={y.mean():.1%}")
+          f"  base_rate={y.mean():.1%}"
+          + (f"  fp_penalty={fp_penalty:.1f}" if fp_penalty != 1.0 else ""))
     if len(X) < 80 or y.sum() < 15 or (y == 0).sum() < 15:
-        print(f"  {name}: insufficient data — skip"); return None, None
+        print(f"  {name}: insufficient data -- skip"); return None, None
 
     val_cut = int(len(X) * 0.80)
     Xf, Xv = X[:val_cut], X[val_cut:]
     yf, yv = y[:val_cut], y[val_cut:]
     n_p = yf.sum(); n_n = (yf == 0).sum()
-    w   = np.where(yf == 1, (n_p+n_n)/(2*n_p), (n_p+n_n)/(2*n_n))
+    # FP penalty: multiply non-signal class weight (reduces false positives)
+    w   = np.where(yf == 1,
+                   (n_p+n_n)/(2*n_p),
+                   (n_p+n_n)/(2*n_n) * fp_penalty)
     m   = _make_lgbm_meta(42)
-    cb  = lgb.early_stopping(100, verbose=False)
+    cb  = lgb.early_stopping(120, verbose=False)
     m.fit(Xf, yf, sample_weight=w, eval_set=[(Xv, yv)], callbacks=[cb])
 
     raw_v = m.predict_proba(Xv)[:, 1]
@@ -389,9 +448,9 @@ def _train_meta_model(X: np.ndarray, y: np.ndarray, name: str
 # ── Main training ─────────────────────────────────────────────────────────────
 def train(syms: list[str], test_mode: bool = False) -> None:
     print(f"\n{'='*60}")
-    print(f"intraday_model_v3  v5.0 train  {'(TEST MODE)' if test_mode else ''}")
-    print(f"Symbols: {len(syms)}  Features: 37  Split: 70/15/15")
-    print(f"ATR-relative labels  |  meta-BUY + meta-SELL  |  4 new features")
+    print(f"intraday_model_v3  v6.0 train  {'(TEST MODE)' if test_mode else ''}")
+    print(f"Symbols: {len(syms)}  Features: {len(V3_FEATURE_COLS)}  Split: 70/15/15")
+    print(f"ATR-relative labels  |  meta-BUY + meta-SELL  |  Premium SELL rule  |  5 new features")
     print(f"{'='*60}\n")
 
     fetch_nifty_5min(days=60)  # warm Nifty cache
@@ -416,7 +475,7 @@ def train(syms: list[str], test_mode: bool = False) -> None:
         print(f"  {sym}: {n} bars  BUY={buy_n}  SELL={sell_n}  HOLD={(labels==0).sum()}")
 
     if len(all_data) < 5:
-        print("Too few symbols — aborting."); return
+        print("Too few symbols -- aborting."); return
 
     # ── Phase 2: Temporal splits ─────────────────────────────────────────
     train_Xs: list[pd.DataFrame] = []
@@ -451,7 +510,7 @@ def train(syms: list[str], test_mode: bool = False) -> None:
         print("Base model training failed."); return
 
     # Stage 2 OOT report on the meta pool (naive, as sanity check)
-    print(f"\n  Sanity check — Stage 2 on meta pool (n={len(X_mt_all):,}):")
+    print(f"\n  Sanity check -- Stage 2 on meta pool (n={len(X_mt_all):,}):")
     dir_pm, hold_pm = _get_probas(models_dir, model_hold, X_mt_all[V3_FEATURE_COLS])
     active_m = hold_pm >= HOLD_THRESHOLD
     buy_s2   = active_m & (dir_pm >= DIR_THRESHOLD)
@@ -482,20 +541,16 @@ def train(syms: list[str], test_mode: bool = False) -> None:
     Xm_all  = df_meta[META_FEATURE_COLS].values.astype(float)
     lbl_m2  = df_meta["label"].values
 
-    # ── Phase 5a: Premium BUY rule calibration ───────────────────────────
-    # Discovery: BUY wins cluster at (dir_p >= 0.75, rsi_5m < 0.40, is_power_hour)
-    # This is a contrarian oversold-bounce pattern, robust across regimes.
-    # We calibrate the exact RSI threshold on the META partition (unseen by Stage 1+2).
-    print("\n── Phase 5a: Premium BUY rule calibration (contrarian bounce) ────────")
     meta_dp  = dir_pm
-    meta_hp  = hold_pm
+    meta_lbl = y_mt_all.values
     meta_rsi = X_mt_all["stock_rsi_5m"].values
     meta_pwr = X_mt_all["is_power_hour"].values
-    meta_lbl = y_mt_all.values
     active_m_arr = hold_pm >= HOLD_THRESHOLD
 
+    # ── Phase 5a: Premium BUY rule calibration ─────────────────────────────
+    print("\n── Phase 5a: Premium BUY rule calibration ────────────────────────────")
     print(f"  {'Dir_thr':>8}  {'RSI_max':>8}  {'Power':>6}  {'N':>6}  {'Prec':>8}")
-    best_rule = {"dir_min": 0.75, "rsi_max": 0.40, "power": True, "prec": 0.0}
+    best_buy_rule = {"dir_min": 0.75, "rsi_max": 0.40, "power": True, "prec": 0.0}
     for dp_thr in [0.70, 0.75, 0.80]:
         for rsi_max in [0.25, 0.30, 0.35, 0.40, 0.45]:
             for pw in [True, False]:
@@ -508,14 +563,42 @@ def train(syms: list[str], test_mode: bool = False) -> None:
                 flag = " ← 80%+" if prec >= 0.80 else ""
                 print(f"  dp>={dp_thr:.2f}  rsi<{rsi_max:.2f}  pow={'Y' if pw else 'N'}  "
                       f"N={n:>6}  {prec:>8.1%}{flag}")
-                if prec >= best_rule["prec"] and n >= 5:
-                    best_rule = {"dir_min": dp_thr, "rsi_max": rsi_max, "power": pw,
-                                 "prec": prec, "n": n}
+                if prec >= best_buy_rule["prec"] and n >= 5:
+                    best_buy_rule = {"dir_min": dp_thr, "rsi_max": rsi_max, "power": pw,
+                                     "prec": prec, "n": n}
 
-    print(f"\n  Best Premium BUY rule: dir>={best_rule['dir_min']:.2f} "
-          f"AND rsi<{best_rule['rsi_max']:.2f} "
-          f"AND power={'Y' if best_rule['power'] else 'N'} "
-          f"→ {best_rule['prec']:.1%} on meta partition (N={best_rule.get('n',0)})")
+    print(f"\n  Best Premium BUY: dir>={best_buy_rule['dir_min']:.2f}  "
+          f"rsi<{best_buy_rule['rsi_max']:.2f}  "
+          f"power={'Y' if best_buy_rule['power'] else 'N'}  "
+          f"-> {best_buy_rule['prec']:.1%}  (N={best_buy_rule.get('n',0)})")
+
+    # ── Phase 5a': Premium SELL rule calibration ────────────────────────────
+    # Mirror of Premium BUY: overbought stock (RSI>70), very confident SELL signal,
+    # Nifty momentum positive (so SELL is contrarian)
+    print("\n── Phase 5a': Premium SELL rule calibration ──────────────────────────")
+    meta_nifty6 = X_mt_all["nifty_ret_6bar"].values
+    print(f"  {'Dir_thr':>8}  {'RSI_min':>8}  {'Power':>6}  {'N':>6}  {'Prec':>8}")
+    best_sell_rule = {"dir_max": 0.25, "rsi_min": 0.60, "power": True, "prec": 0.0}
+    for dp_ceil in [0.30, 0.25, 0.20]:
+        for rsi_min in [0.55, 0.60, 0.65, 0.70]:
+            for pw in [True, False]:
+                mask = (active_m_arr & (meta_dp <= dp_ceil) &
+                        (meta_rsi > rsi_min) &
+                        ((meta_pwr > 0) if pw else True))
+                n = mask.sum()
+                if n < 5: continue
+                prec = (meta_lbl[mask] == -1).mean()
+                flag = " ← 75%+" if prec >= 0.75 else ""
+                print(f"  dp<={dp_ceil:.2f}  rsi>{rsi_min:.2f}  pow={'Y' if pw else 'N'}  "
+                      f"N={n:>6}  {prec:>8.1%}{flag}")
+                if prec >= best_sell_rule["prec"] and n >= 5:
+                    best_sell_rule = {"dir_max": dp_ceil, "rsi_min": rsi_min, "power": pw,
+                                      "prec": prec, "n": n}
+
+    print(f"\n  Best Premium SELL: dir<={best_sell_rule['dir_max']:.2f}  "
+          f"rsi>{best_sell_rule['rsi_min']:.2f}  "
+          f"power={'Y' if best_sell_rule['power'] else 'N'}  "
+          f"-> {best_sell_rule['prec']:.1%}  (N={best_sell_rule.get('n',0)})")
 
     # ── Phase 5b: Train Stage 3 meta-BUY and meta-SELL classifiers ───────
     print("\n── Phase 5b: Meta-BUY classifier ────────────────────────────────────")
@@ -524,11 +607,13 @@ def train(syms: list[str], test_mode: bool = False) -> None:
     y_mbuy    = (lbl_m2[buy_mask] == 1).astype(int)
     meta_buy_model, meta_buy_cal = _train_meta_model(X_mbuy, y_mbuy, "Meta-BUY")
 
-    print("\n── Phase 5c: Meta-SELL classifier ───────────────────────────────────")
+    print("\n── Phase 5c: Meta-SELL classifier (FP-penalty) ──────────────────────")
     sell_mask = df_meta["dir_proba"].values <= (1 - BASE_PRE_FILTER)
     X_msell   = Xm_all[sell_mask]
     y_msell   = (lbl_m2[sell_mask] == -1).astype(int)
-    meta_sell_model, meta_sell_cal = _train_meta_model(X_msell, y_msell, "Meta-SELL")
+    meta_sell_model, meta_sell_cal = _train_meta_model(
+        X_msell, y_msell, "Meta-SELL", fp_penalty=FP_PENALTY
+    )
 
     # ── Phase 6: Holdout OOT evaluation ──────────────────────────────────
     print("\n── Phase 6: Holdout OOT evaluation ──────────────────────────────────")
@@ -587,32 +672,37 @@ def train(syms: list[str], test_mode: bool = False) -> None:
     print(f"    BUY  {s2_buy_tot:>5} signals  avg_prec={np.mean(valid_bp):.1%}" if valid_bp else "    BUY: no signals")
     print(f"    SELL {s2_sell_tot:>5} signals  avg_prec={np.mean(valid_sp):.1%}" if valid_sp else "    SELL: no signals")
 
-    # Sweep meta threshold on holdout to find 80% precision point
-    def _sweep(proba_arr, label_arr, name) -> float:
+    # Fine-grained threshold sweep (0.01 steps) with minimum-signal constraint
+    def _sweep(proba_arr, label_arr, name, min_sigs: int = 10) -> float:
         if not proba_arr or not label_arr:
             print(f"\n  {name}: no data"); return 0.75
         p  = np.array(proba_arr); y_ = np.array(label_arr)
-        print(f"\n  {name} ({len(p)} pre-filtered holdout bars, base_rate={y_.mean():.1%}):")
+        print(f"\n  {name} ({len(p)} holdout bars, base_rate={y_.mean():.1%}, "
+              f"min_sigs={min_sigs}):")
         print(f"    {'Thr':>5}  {'N':>6}  {'Precision':>10}  {'Recall':>8}")
         best_thr = 0.75; best_prec = 0.0; found_80 = False
-        for thr in np.arange(0.50, 0.96, 0.05):
+        # Coarse pass to find interesting region, then fine-grained around it
+        for thr in list(np.arange(0.50, 0.97, 0.01)):
             emit = p >= thr
-            if emit.sum() == 0: break
+            n = emit.sum()
+            if n < min_sigs: break      # enforce minimum signal count
             pr   = precision_score(y_, emit.astype(int), zero_division=0)
             rec  = emit[y_ == 1].mean() if y_.sum() > 0 else 0
             flag = "  ← 80% ✓" if pr >= 0.80 and not found_80 else ""
-            print(f"    {thr:>5.2f}  {emit.sum():>6}  {pr:>10.1%}  {rec:>8.1%}{flag}")
+            if thr in np.arange(0.50, 0.97, 0.05) or pr >= 0.78 or n <= min_sigs + 20:
+                print(f"    {thr:>5.2f}  {n:>6}  {pr:>10.1%}  {rec:>8.1%}{flag}")
             if pr >= 0.80 and not found_80:
                 found_80 = True
             if pr > best_prec:
                 best_prec = pr; best_thr = thr
         if not found_80:
-            print(f"    [80% NOT reached — best: {best_prec:.1%} @ {best_thr:.2f}]")
+            print(f"    [80% NOT reached -- best: {best_prec:.1%} @ {best_thr:.2f}]")
         return best_thr
 
-    best_buy_thr  = _sweep(all_meta_buy_p,  all_meta_buy_y,  "Meta-BUY  holdout")
+    best_buy_thr  = _sweep(all_meta_buy_p,  all_meta_buy_y,  "Meta-BUY  holdout", min_sigs=10)
     best_sell_thr = max(META_SELL_FLOOR,
-                        _sweep(all_meta_sell_p, all_meta_sell_y, "Meta-SELL holdout"))
+                        _sweep(all_meta_sell_p, all_meta_sell_y, "Meta-SELL holdout",
+                               min_sigs=MIN_SELL_SIGS))
 
     # Final metrics at best thresholds
     def _final(proba_arr, label_arr, thr, label_val):
@@ -632,14 +722,15 @@ def train(syms: list[str], test_mode: bool = False) -> None:
 
     # ── Save ──────────────────────────────────────────────────────────────
     blob = {
-        "version":           "5.0",
+        "version":           "6.0",
         "trained_at":        date.today().isoformat(),
         "feature_cols":      V3_FEATURE_COLS,
         "meta_feature_cols": META_FEATURE_COLS,
         "models_dir":        models_dir,
         "model_hold":        model_hold,
         # BUY: meta-classifier + rule-based premium override
-        "premium_buy_rule":  best_rule,
+        "premium_buy_rule":   best_buy_rule,
+        "premium_sell_rule":  best_sell_rule,
         "meta_buy_model":    meta_buy_model,
         "meta_buy_cal":      meta_buy_cal,
         "meta_sell_model":   meta_sell_model,
@@ -756,6 +847,17 @@ def predict(symbol: str) -> dict:
         if cal >= sell_thr:
             meta_signal = "SELL"; meta_conf = cal
 
+    # Stage 3 SELL override: Premium SELL rule (overbought contrarian short)
+    # dir_p≤0.25 + RSI>60% + power_hour -> high-conviction reversal short
+    prem_sell_rule = blob.get("premium_sell_rule", {})
+    if prem_sell_rule and (1 - dir_p) >= (1 - prem_sell_rule.get("dir_max", 0.25)):
+        stock_rsi  = float(latest_feats.get("stock_rsi_5m", 0.0))
+        is_pow     = float(latest_feats.get("is_power_hour", 0.0))
+        rsi_ok     = stock_rsi > prem_sell_rule.get("rsi_min", 0.60)
+        pow_ok     = (not prem_sell_rule.get("power", True)) or (is_pow > 0)
+        if rsi_ok and pow_ok and prem_sell_rule.get("prec", 0) >= 0.70:
+            meta_signal = "SELL"; meta_conf = 1 - dir_p; premium = True
+
     # Regime filter: suppress signals that fight the Nifty trend
     nifty_day = float(latest_feats.get("nifty_day_ret", 0.0))
     regime_suppressed = False
@@ -765,8 +867,8 @@ def predict(symbol: str) -> dict:
         meta_signal = "HOLD"; meta_conf = 0.0; regime_suppressed = True
 
     # Stop loss and target (ATR-based)
-    # Premium BUY  : tight stop (1.0× ATR), generous target (1.5× ATR) → R:R 1:1.5
-    # Meta-SELL    : wider stop (1.5× ATR), target (2.0× ATR)           → R:R 1:1.33
+    # Premium BUY  : tight stop (1.0* ATR), generous target (1.5* ATR) -> R:R 1:1.5
+    # Meta-SELL    : wider stop (1.5* ATR), target (2.0* ATR)           -> R:R 1:1.33
     rr = None
     if entry_price and atr_5m and not np.isnan(atr_5m) and meta_signal != "HOLD":
         if meta_signal == "BUY":
@@ -801,7 +903,7 @@ def predict(symbol: str) -> dict:
 def batch_predict_parallel(symbols: list[str], max_workers: int = 10) -> dict[str, dict]:
     """
     Run predict() for all symbols in parallel using a thread pool.
-    Returns {symbol: result_dict}. Never raises — errors appear as HOLD signals.
+    Returns {symbol: result_dict}. Never raises -- errors appear as HOLD signals.
 
     max_workers=10 is a safe default; yfinance handles ~10 concurrent requests
     without rate-limiting. Increase to 15-20 on fast connections.
