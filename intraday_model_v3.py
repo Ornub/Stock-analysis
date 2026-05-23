@@ -926,6 +926,83 @@ def batch_predict_parallel(symbols: list[str], max_workers: int = 10) -> dict[st
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+def _cmd_eval(sample_syms: list[str] | None = None) -> None:
+    """Load saved model, print stored holdout metrics, run live predictions."""
+    import json
+
+    # ── Load blob ────────────────────────────────────────────────────────────
+    model_path = Path("models/intraday_v3.pkl")
+    if not model_path.exists():
+        print("No model found — run: python intraday_model_v3.py train")
+        return
+
+    import __main__
+    from swing_v2 import LGBMEnsemble
+    __main__.LGBMEnsemble = LGBMEnsemble
+    blob = joblib.load(model_path)
+
+    version       = blob.get("version", "?")
+    n_feats       = len(blob.get("feature_cols", []))
+    sym_list      = blob.get("sym_list", [])
+    buy_thr       = blob.get("meta_buy_thresh",  0.0)
+    sell_thr      = blob.get("meta_sell_thresh", 0.0)
+    buy_prec      = blob.get("holdout_buy_prec",  0.0)
+    sell_prec     = blob.get("holdout_sell_prec", 0.0)
+    prem_buy      = blob.get("premium_buy_rule",  {})
+    prem_sell     = blob.get("premium_sell_rule", {})
+
+    print("=" * 60)
+    print(f"  intraday_model_v3  v{version}  — saved model report")
+    print("=" * 60)
+    print(f"  Trained symbols : {len(sym_list)}")
+    print(f"  Feature columns : {n_feats}")
+    print()
+    print("── Holdout OOT precision (never-seen data) ──────────────────")
+    buy_ok  = "✓" if buy_prec  >= 0.80 else "✗"
+    sell_ok = "✓" if sell_prec >= 0.80 else "✗"
+    print(f"  {buy_ok}  BUY  precision: {buy_prec:.1%}  @ meta_thr={buy_thr:.2f}")
+    print(f"  {sell_ok}  SELL precision: {sell_prec:.1%}  @ meta_thr={sell_thr:.2f}")
+    print()
+
+    if prem_buy:
+        print("── Premium BUY rule ──────────────────────────────────────────")
+        print(f"  dir >= {prem_buy.get('dir_min', '?')}  |  RSI < {prem_buy.get('rsi_max', '?')}  |  "
+              f"power={'Y' if prem_buy.get('power') else 'N'}  |  "
+              f"prec={prem_buy.get('prec', 0):.1%}  (N={prem_buy.get('n', 0)})")
+
+    if prem_sell:
+        print("── Premium SELL rule ─────────────────────────────────────────")
+        print(f"  dir <= {prem_sell.get('dir_max', '?')}  |  RSI > {prem_sell.get('rsi_min', '?')}  |  "
+              f"power={'Y' if prem_sell.get('power') else 'N'}  |  "
+              f"prec={prem_sell.get('prec', 0):.1%}  (N={prem_sell.get('n', 0)})")
+
+    # ── Live predict sample ──────────────────────────────────────────────────
+    syms = sample_syms or sym_list[:10]
+    print()
+    print(f"── Live predictions (sample: {len(syms)} symbols) ────────────────")
+    print(f"  {'Symbol':<14} {'Signal':<6} {'Premium':<8} {'Dir%':>6} {'Meta%':>6}  Entry")
+
+    signals = {"BUY": 0, "SELL": 0, "HOLD": 0, "ERR": 0}
+    for sym in syms:
+        try:
+            r = predict(sym)
+            sig  = r.get("signal", "ERR")
+            prem = "⭐" if r.get("premium") else ""
+            dp   = r.get("dir_proba",  0.0) or 0.0
+            mp   = r.get("meta_proba", 0.0) or 0.0
+            ep   = r.get("entry_price")
+            ep_s = f"₹{ep:,.1f}" if ep else "—"
+            signals[sig if sig in signals else "ERR"] += 1
+            print(f"  {sym:<14} {sig:<6} {prem:<8} {dp:>5.0%} {mp:>5.0%}  {ep_s}")
+        except Exception as exc:
+            signals["ERR"] += 1
+            print(f"  {sym:<14} ERROR: {exc}")
+
+    print()
+    print(f"  Summary: {signals['BUY']} BUY  {signals['SELL']} SELL  "
+          f"{signals['HOLD']} HOLD  {signals['ERR']} ERR  (of {len(syms)} sampled)")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
@@ -935,6 +1012,9 @@ if __name__ == "__main__":
         test_mode = "--test" in args
         syms = NIFTY_50[:12] if test_mode else NIFTY_50
         train(syms, test_mode=test_mode)
+    elif cmd == "eval":
+        custom = [s.strip().upper() for s in args[1].split(",") if s.strip()] if len(args) > 1 else None
+        _cmd_eval(custom)
     elif cmd == "predict":
         if len(args) < 2:
             print("Usage: python intraday_model_v3.py predict SYMBOL")
