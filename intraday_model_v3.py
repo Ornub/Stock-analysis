@@ -828,9 +828,9 @@ def predict(symbol: str) -> dict:
             meta_signal = "BUY"; meta_conf = cal; premium = False
 
     # Stage 3 BUY override: Premium rule (oversold contrarian bounce)
-    # dir_p≥0.80 + RSI<30% + power_hour + Nifty momentum negative
+    # dir_p≥0.80 + RSI<30% + power_hour + prec≥75% required (OOT2 showed 72.1% overfits)
     prem_rule = blob.get("premium_buy_rule", {})
-    if prem_rule and dir_p >= prem_rule.get("dir_min", 0.80):
+    if prem_rule and prem_rule.get("prec", 0) >= 0.75 and dir_p >= prem_rule.get("dir_min", 0.80):
         stock_rsi  = float(latest_feats.get("stock_rsi_5m", 1.0))
         is_pow     = float(latest_feats.get("is_power_hour", 0.0))
         nifty_ret6 = float(latest_feats.get("nifty_ret_6bar", 0.0))
@@ -925,6 +925,296 @@ def batch_predict_parallel(symbols: list[str], max_workers: int = 10) -> dict[st
 
 
 
+# ── OOT2: bar-by-bar pipeline replay on holdout slice ─────────────────────────
+
+def _apply_pipeline_batch(
+    feats: pd.DataFrame,
+    blob: dict,
+) -> pd.DataFrame:
+    """
+    Run the full 3-stage pipeline on every row of feats.
+    Returns a DataFrame with columns: [signal, dir_p, hold_p, meta_p, premium].
+    """
+    feat_cols  = blob.get("feature_cols",     V3_FEATURE_COLS)
+    meta_fcols = blob.get("meta_feature_cols", META_FEATURE_COLS)
+    model_hold = blob["model_hold"]
+    models_dir = blob["models_dir"]
+    meta_buy_m = blob.get("meta_buy_model")
+    meta_buy_c = blob.get("meta_buy_cal")
+    meta_sell_m= blob.get("meta_sell_model")
+    meta_sell_c= blob.get("meta_sell_cal")
+    buy_thr    = blob.get("meta_buy_thresh",  0.75)
+    sell_thr   = blob.get("meta_sell_thresh", 0.75)
+    dir_thr    = blob.get("dir_threshold",    DIR_THRESHOLD)
+    hold_thr   = blob.get("hold_threshold",   HOLD_THRESHOLD)
+    pre_flt    = blob.get("base_pre_filter",  BASE_PRE_FILTER)
+    prem_buy   = blob.get("premium_buy_rule", {})
+    prem_sell  = blob.get("premium_sell_rule", {})
+
+    X      = feats[feat_cols].fillna(0).values
+    hold_p = model_hold.predict_proba(X)[:, 1]
+    dir_p  = _dir_proba_ens(models_dir, feats[feat_cols].fillna(0))
+
+    n = len(feats)
+    signals = ["HOLD"] * n
+    premiums = [False] * n
+    meta_p   = np.zeros(n)
+
+    # Meta feature matrix (feat_cols + dir_p + hold_p)
+    Xm = np.concatenate([X, dir_p.reshape(-1, 1), hold_p.reshape(-1, 1)], axis=1)
+    Xm_df = pd.DataFrame(Xm, columns=meta_fcols, index=feats.index)
+
+    # Pre-compute auxiliary columns for premium rules
+    rsi_col  = feats["stock_rsi_5m"].values   if "stock_rsi_5m"   in feats.columns else np.full(n, 0.5)
+    pow_col  = feats["is_power_hour"].values  if "is_power_hour"  in feats.columns else np.zeros(n)
+    nrd6_col = feats["nifty_ret_6bar"].values if "nifty_ret_6bar" in feats.columns else np.zeros(n)
+    nday_col = feats["nifty_day_ret"].values  if "nifty_day_ret"  in feats.columns else np.zeros(n)
+
+    # Stage 1: HOLD filter
+    active = hold_p >= hold_thr
+
+    # Stage 2: direction (on active bars only)
+    buy_mask  = active & (dir_p >= dir_thr)
+    sell_mask = active & ((1 - dir_p) >= dir_thr)
+
+    # Stage 3: meta-BUY
+    if meta_buy_m is not None:
+        buy_cand = active & (dir_p >= pre_flt)
+        if buy_cand.any():
+            raw_b = meta_buy_m.predict_proba(Xm_df[buy_cand])[:, 1]
+            cal_b = meta_buy_c.predict(raw_b)
+            fire  = cal_b >= buy_thr
+            idx   = np.where(buy_cand)[0][fire]
+            for i, ci in enumerate(idx):
+                signals[ci]  = "BUY"
+                meta_p[ci]   = cal_b[fire][i]
+                premiums[ci] = False
+
+    # Stage 3: meta-SELL
+    if meta_sell_m is not None:
+        sell_cand = active & (dir_p <= (1 - pre_flt))
+        if sell_cand.any():
+            raw_s = meta_sell_m.predict_proba(Xm_df[sell_cand])[:, 1]
+            cal_s = meta_sell_c.predict(raw_s)
+            fire  = cal_s >= sell_thr
+            idx   = np.where(sell_cand)[0][fire]
+            for i, ci in enumerate(idx):
+                if signals[ci] == "HOLD":   # don't overwrite BUY
+                    signals[ci]  = "SELL"
+                    meta_p[ci]   = cal_s[fire][i]
+                    premiums[ci] = False
+
+    # Premium BUY override (only if calibrated prec≥75%; 72.1% rule is excluded)
+    if prem_buy and prem_buy.get("prec", 0) >= 0.75:
+        pmask = (active & (dir_p >= prem_buy.get("dir_min", 0.80)) &
+                 (rsi_col < prem_buy.get("rsi_max", 0.25)))
+        if prem_buy.get("power", True):
+            pmask &= pow_col > 0
+        if prem_buy.get("nifty_trend_max") is not None:
+            pmask &= nrd6_col < prem_buy["nifty_trend_max"]
+        for ci in np.where(pmask)[0]:
+            signals[ci]  = "BUY"
+            meta_p[ci]   = dir_p[ci]
+            premiums[ci] = True
+
+    # Premium SELL override
+    if prem_sell and prem_sell.get("prec", 0) >= 0.70:
+        smask = (active & (dir_p <= prem_sell.get("dir_max", 0.25)) &
+                 (rsi_col > prem_sell.get("rsi_min", 0.65)))
+        if prem_sell.get("power", False):
+            smask &= pow_col > 0
+        for ci in np.where(smask)[0]:
+            if not premiums[ci]:
+                signals[ci]  = "SELL"
+                meta_p[ci]   = 1 - dir_p[ci]
+                premiums[ci] = True
+
+    # Regime filter
+    for ci in range(n):
+        if signals[ci] == "BUY"  and nday_col[ci] < -REGIME_THRESHOLD:
+            signals[ci] = "HOLD"; meta_p[ci] = 0.0; premiums[ci] = False
+        elif signals[ci] == "SELL" and nday_col[ci] >  REGIME_THRESHOLD:
+            signals[ci] = "HOLD"; meta_p[ci] = 0.0; premiums[ci] = False
+
+    return pd.DataFrame({
+        "signal":  signals,
+        "dir_p":   dir_p,
+        "hold_p":  hold_p,
+        "meta_p":  meta_p,
+        "premium": premiums,
+    }, index=feats.index)
+
+
+def _cmd_oot2(syms: list[str] | None = None) -> None:
+    """
+    Bar-by-bar pipeline replay on the holdout slice (last 15%) of each symbol.
+    Evaluates actual next-8-bar outcome against the model's fired signals.
+    """
+    import __main__
+    from swing_v2 import LGBMEnsemble
+    __main__.LGBMEnsemble = LGBMEnsemble
+    blob = joblib.load(Path("models/intraday_v3.pkl"))
+
+    version  = blob.get("version", "?")
+    sym_list = syms or blob.get("sym_list", NIFTY_50)
+
+    print("=" * 65)
+    print(f"  OOT2 — intraday_model_v3 v{version}  bar-by-bar holdout replay")
+    print("=" * 65)
+    print(f"  Symbols: {len(sym_list)}  |  Holdout = last 15% per symbol  |  "
+          f"TARGET_BARS={TARGET_BARS}\n")
+
+    all_rows: list[dict] = []
+    skipped = 0
+
+    for sym in sym_list:
+        try:
+            from data_cache import get_bars
+            raw = get_bars(sym, days=60)
+        except Exception:
+            try:
+                raw = fetch_5min(sym, days=60)
+            except Exception:
+                skipped += 1; continue
+
+        if raw is None or len(raw) < 200:
+            skipped += 1; continue
+
+        feats = compute_features_v3(raw)
+        if feats is None or feats.empty:
+            skipped += 1; continue
+
+        # Align raw bars to feats index
+        raw_a = raw.loc[feats.index] if len(raw) == len(feats) else raw.iloc[-len(feats):]
+
+        # ATR-relative labels on full data
+        labels = make_labels_atr(raw_a)
+
+        # Holdout = last 15%
+        n      = len(feats)
+        t2     = int(n * (TRAIN_FRAC + META_FRAC))
+        hd_f   = feats.iloc[t2:]
+        hd_raw = raw_a.iloc[t2:]
+        hd_lbl = labels.iloc[t2:]
+
+        if len(hd_f) < TARGET_BARS + 5:
+            skipped += 1; continue
+
+        # Run pipeline on holdout bars (exclude last TARGET_BARS — no outcome yet)
+        eval_f   = hd_f.iloc[:-TARGET_BARS]
+        eval_raw = hd_raw.iloc[:-TARGET_BARS]
+        eval_lbl = hd_lbl.iloc[:-TARGET_BARS]
+        # Actual future bars for P&L calculation
+        future_raw = hd_raw
+
+        sig_df = _apply_pipeline_batch(eval_f, blob)
+
+        # Reset integer position index for aligned slicing
+        eval_raw_r = eval_raw.reset_index(drop=True)
+        eval_lbl_r = eval_lbl.reset_index(drop=True)
+        future_raw_r = future_raw.reset_index(drop=True)
+
+        # Grab DateTime column for display
+        dt_col = None
+        if "DateTime" in eval_raw.columns:
+            dt_col = eval_raw["DateTime"].reset_index(drop=True)
+        elif hasattr(eval_raw.index, "dtype") and str(eval_raw.index.dtype).startswith("datetime"):
+            dt_col = pd.Series(eval_raw.index, name="DateTime").reset_index(drop=True)
+
+        for pos, (_, row) in enumerate(sig_df.iterrows()):
+            sig = row["signal"]
+            if sig == "HOLD":
+                continue
+
+            actual_lbl = int(eval_lbl_r.iloc[pos])
+            entry_c    = float(eval_raw_r["Close"].iloc[pos])
+
+            # Walk forward TARGET_BARS to find actual high/low
+            fwd_slice  = future_raw_r.iloc[pos + 1 : pos + 1 + TARGET_BARS]
+            if fwd_slice.empty:
+                continue
+            max_h = float(fwd_slice["High"].max())
+            min_l = float(fwd_slice["Low"].min())
+
+            if sig == "BUY":
+                predicted_correct = (actual_lbl == 1)
+                best_ret = (max_h - entry_c) / entry_c * 100
+                worst_ret= (min_l - entry_c) / entry_c * 100
+            else:  # SELL
+                predicted_correct = (actual_lbl == -1)
+                best_ret = (entry_c - min_l) / entry_c * 100
+                worst_ret= (entry_c - max_h) / entry_c * 100
+
+            ts = str(dt_col.iloc[pos])[:16] if dt_col is not None else f"bar_{pos}"
+            all_rows.append({
+                "symbol":   sym,
+                "ts":       ts,
+                "signal":   sig,
+                "premium":  bool(row["premium"]),
+                "dir_p":    round(float(row["dir_p"]),  3),
+                "meta_p":   round(float(row["meta_p"]), 3),
+                "correct":  predicted_correct,
+                "best_ret": round(best_ret,  2),
+                "worst_ret":round(worst_ret, 2),
+                "actual":   {1: "BUY", -1: "SELL", 0: "HOLD"}.get(actual_lbl, "?"),
+            })
+
+    if not all_rows:
+        print("  No signals found in holdout. Check data availability.")
+        return
+
+    df = pd.DataFrame(all_rows)
+
+    # ── Per-signal table ──────────────────────────────────────────────────────
+    print(f"  {'Symbol':<13} {'Time':<17} {'Sig':<5} {'Prem':<5} "
+          f"{'Dir':>5} {'Meta':>5} {'Actual':<6} {'OK':>3} {'Best%':>7} {'Worst%':>8}")
+    print("  " + "-" * 80)
+    for _, r in df.iterrows():
+        ok   = "✓" if r["correct"] else "✗"
+        prem = "⭐" if r["premium"] else ""
+        mp_s = f"{r['meta_p']:.0%}" if r["meta_p"] > 0 else "—"
+        print(f"  {r['symbol']:<13} {r['ts']:<17} {r['signal']:<5} {prem:<5} "
+              f"{r['dir_p']:>4.0%} {mp_s:>5} {r['actual']:<6} {ok:>3} "
+              f"{r['best_ret']:>+6.2f}% {r['worst_ret']:>+7.2f}%")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print()
+    print("── OOT2 Summary ─────────────────────────────────────────────────────")
+
+    def _report(label: str, sub: pd.DataFrame) -> None:
+        if sub.empty:
+            print(f"  — {label}: no signals")
+            return
+        n_ok  = sub["correct"].sum()
+        n_sig = len(sub)
+        prec  = n_ok / n_sig
+        avg_b = sub["best_ret"].mean()
+        avg_w = sub["worst_ret"].mean()
+        ok_s  = "✓" if prec >= 0.80 else "✗"
+        print(f"  {ok_s} {label:<25} {n_ok:>2}/{n_sig:<2} = {prec:>5.1%}  "
+              f"avg_best={avg_b:+.2f}%  avg_worst={avg_w:+.2f}%")
+
+    _report("BUY  (meta-classifier)",  df[(df["signal"] == "BUY")  & ~df["premium"]])
+    _report("BUY  (⭐ Premium rule)",   df[(df["signal"] == "BUY")  &  df["premium"]])
+    _report("SELL (meta-classifier)",  df[(df["signal"] == "SELL") & ~df["premium"]])
+    _report("SELL (⭐ Premium rule)",   df[(df["signal"] == "SELL") &  df["premium"]])
+
+    print()
+    # Deduplicated: keep first signal per symbol per session date
+    df["date"] = df["ts"].str[:10]
+    dedup = df.groupby(["symbol", "signal", "date"]).first().reset_index()
+    total_d = len(dedup)
+    n_ok_d  = dedup["correct"].sum()
+    print(f"  De-duplicated (1st signal/symbol/day):")
+    _report("  BUY",  dedup[dedup["signal"] == "BUY"])
+    _report("  SELL", dedup[dedup["signal"] == "SELL"])
+
+    total  = len(df)
+    n_ok   = df["correct"].sum()
+    print(f"\n  All signals : {n_ok}/{total} = {n_ok/total:.1%}  "
+          f"({total-n_ok} misses)  |  skipped {skipped} symbols")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 def _cmd_eval(sample_syms: list[str] | None = None) -> None:
     """Load saved model, print stored holdout metrics, run live predictions."""
@@ -1015,6 +1305,9 @@ if __name__ == "__main__":
     elif cmd == "eval":
         custom = [s.strip().upper() for s in args[1].split(",") if s.strip()] if len(args) > 1 else None
         _cmd_eval(custom)
+    elif cmd == "oot2":
+        custom = [s.strip().upper() for s in args[1].split(",") if s.strip()] if len(args) > 1 else None
+        _cmd_oot2(custom)
     elif cmd == "predict":
         if len(args) < 2:
             print("Usage: python intraday_model_v3.py predict SYMBOL")
