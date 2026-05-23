@@ -2,8 +2,14 @@ __pycache__/
 *.pyc
 *.pyo
 
-# News cache (refreshed at runtime)
+# Runtime-generated data (caches, DBs, sessions — not for VCS)
 data/news_cache.json
+data/results_calendar.json
 data/cache/
 data/signal_log.db
+data/positions.db
+data/angel_session.pkl
+data/angel_scrip_master.pkl
+data/*_feats.pkl
+logs/
 .env
