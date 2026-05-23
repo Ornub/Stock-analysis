@@ -75,8 +75,9 @@ MODEL_PATH_V3   = Path("models/intraday_v3.pkl")
 REGIME_THRESHOLD = 0.015   # 1.5% Nifty day move suppresses opposite-direction signals
 
 TRAIN_FRAC      = 0.70   # first 70% per symbol -> pooled Stage 1+2 training
-META_FRAC       = 0.15   # next 15% per symbol  -> pooled Stage 3 meta training
-# Holdout = last 15% per symbol
+META_FRAC       = 0.10   # next 10% per symbol  -> pooled Stage 3 meta training
+VAL_FRAC        = 0.10   # next 10% per symbol  -> threshold tuning ONLY (never evaluated on)
+# Holdout = last 10% per symbol  -- never used in any training or tuning decision
 
 BASE_PRE_FILTER = 0.55   # dir_p ≥ this -> include bar in meta-BUY training data
 ES_POOL_FRAC    = 0.85   # within training pool: first 85% = fit, last 15% = ES val
@@ -449,8 +450,8 @@ def _train_meta_model(X: np.ndarray, y: np.ndarray, name: str,
 def train(syms: list[str], test_mode: bool = False) -> None:
     print(f"\n{'='*60}")
     print(f"intraday_model_v3  v6.0 train  {'(TEST MODE)' if test_mode else ''}")
-    print(f"Symbols: {len(syms)}  Features: {len(V3_FEATURE_COLS)}  Split: 70/15/15")
-    print(f"ATR-relative labels  |  meta-BUY + meta-SELL  |  Premium SELL rule  |  5 new features")
+    print(f"Symbols: {len(syms)}  Features: {len(V3_FEATURE_COLS)}  Split: 70/10/10/10")
+    print(f"ATR labels  |  meta-BUY + meta-SELL  |  thr tuned on val  |  unbiased holdout")
     print(f"{'='*60}\n")
 
     fetch_nifty_5min(days=60)  # warm Nifty cache
@@ -477,21 +478,27 @@ def train(syms: list[str], test_mode: bool = False) -> None:
     if len(all_data) < 5:
         print("Too few symbols -- aborting."); return
 
-    # ── Phase 2: Temporal splits ─────────────────────────────────────────
+    # ── Phase 2: Temporal splits (4-way: train | meta | val | holdout) ───────
+    # val  = threshold tuning set  (influences meta thresholds, nothing else)
+    # holdout = truly untouched    (no training, no tuning decision used it)
     train_Xs: list[pd.DataFrame] = []
     train_ys: list[pd.Series]    = []
     meta_Xs: list[pd.DataFrame]  = []
     meta_ys: list[pd.Series]     = []
-    holdout: list[tuple]         = []
+    val_data: list[tuple]        = []
+    holdout:  list[tuple]        = []
 
     for sym, (feats, labels, dt_s) in all_data.items():
         n   = len(feats)
         t1  = int(n * TRAIN_FRAC)
         t2  = int(n * (TRAIN_FRAC + META_FRAC))
+        t3  = int(n * (TRAIN_FRAC + META_FRAC + VAL_FRAC))
         train_Xs.append(feats.iloc[:t1]);  train_ys.append(labels.iloc[:t1])
         meta_Xs.append(feats.iloc[t1:t2]); meta_ys.append(labels.iloc[t1:t2])
-        holdout.append((sym, feats.iloc[t2:][V3_FEATURE_COLS],
-                        labels.iloc[t2:], dt_s.iloc[t2:]))
+        val_data.append((sym, feats.iloc[t2:t3][V3_FEATURE_COLS],
+                         labels.iloc[t2:t3], dt_s.iloc[t2:t3]))
+        holdout.append((sym, feats.iloc[t3:][V3_FEATURE_COLS],
+                        labels.iloc[t3:], dt_s.iloc[t3:]))
 
     X_tr_all = pd.concat(train_Xs, ignore_index=True)
     y_tr_all = pd.concat(train_ys, ignore_index=True)
@@ -500,7 +507,8 @@ def train(syms: list[str], test_mode: bool = False) -> None:
 
     print(f"\n  Training pool : {len(X_tr_all):,} rows")
     print(f"  Meta pool     : {len(X_mt_all):,} rows")
-    print(f"  Holdout total : {sum(len(h[1]) for h in holdout):,} rows")
+    print(f"  Val (thr tune): {sum(len(v[1]) for v in val_data):,} rows")
+    print(f"  Holdout (OOT) : {sum(len(h[1]) for h in holdout):,} rows")
 
     # ── Phase 3: Train pooled Stage 1+2 ──────────────────────────────────
     print("\n── Phase 3: Train pooled Stage 1+2 ──────────────────────────────────")
@@ -615,110 +623,115 @@ def train(syms: list[str], test_mode: bool = False) -> None:
         X_msell, y_msell, "Meta-SELL", fp_penalty=FP_PENALTY
     )
 
-    # ── Phase 6: Holdout OOT evaluation ──────────────────────────────────
-    print("\n── Phase 6: Holdout OOT evaluation ──────────────────────────────────")
+    # ── Phase 6a: Threshold tuning on VAL set (separate from holdout) ────────
+    # Thresholds are chosen on val_data ONLY -- holdout is never touched here.
+    print("\n── Phase 6a: Threshold tuning on VAL set ────────────────────────────")
 
-    all_buy_n = all_buy_win = 0
-    all_sell_n = all_sell_win = 0
-    all_meta_buy_p: list[float] = []
-    all_meta_buy_y: list[int]   = []
-    all_meta_sell_p: list[float] = []
-    all_meta_sell_y: list[int]   = []
+    def _collect_meta_probas(dataset, label_val: int):
+        """Run Stage 3 meta model over dataset; return (proba_list, label_list)."""
+        all_p: list[float] = []; all_y: list[int] = []
+        for sym, X_ds, y_ds, _ in dataset:
+            if len(X_ds) < 20: continue
+            dir_pd, hold_pd = _get_probas(models_dir, model_hold, X_ds)
+            lbl_d  = y_ds.values
+            active = hold_pd >= HOLD_THRESHOLD
+            if label_val == 1:
+                pre = active & (dir_pd >= BASE_PRE_FILTER)
+                model, cal = meta_buy_model, meta_buy_cal
+            else:
+                pre = active & (dir_pd <= 1 - BASE_PRE_FILTER)
+                model, cal = meta_sell_model, meta_sell_cal
+            if model is None or pre.sum() == 0: continue
+            Xm  = np.column_stack([X_ds[pre].values, dir_pd[pre], hold_pd[pre]])
+            raw = model.predict_proba(Xm)[:, 1]
+            c   = cal.predict(raw)
+            all_p.extend(c.tolist())
+            all_y.extend((lbl_d[pre] == label_val).astype(int).tolist())
+        return all_p, all_y
 
-    sym_results: list[dict] = []
-    for sym, X_hd, y_hd, _ in holdout:
-        if len(X_hd) < 20: continue
-        dir_ph, hold_ph = _get_probas(models_dir, model_hold, X_hd)
-        lbl_h = y_hd.values
-        active_h = hold_ph >= HOLD_THRESHOLD
+    def _collect_stage2(dataset):
+        """Collect Stage 2 stats for a dataset (sanity baseline)."""
+        buy_n = sell_n = 0
+        buy_wins = sell_wins = 0
+        for sym, X_ds, y_ds, _ in dataset:
+            if len(X_ds) < 20: continue
+            dir_pd, hold_pd = _get_probas(models_dir, model_hold, X_ds)
+            lbl_d = y_ds.values
+            active = hold_pd >= HOLD_THRESHOLD
+            bs = active & (dir_pd >= DIR_THRESHOLD)
+            ss = active & ((1 - dir_pd) >= DIR_THRESHOLD)
+            buy_n   += int(bs.sum()); buy_wins  += int((lbl_d[bs] == 1).sum())
+            sell_n  += int(ss.sum()); sell_wins += int((lbl_d[ss] == -1).sum())
+        return buy_n, buy_wins, sell_n, sell_wins
 
-        # Stage 2 precision on holdout (baseline)
-        buy_s2h  = active_h & (dir_ph >= DIR_THRESHOLD)
-        sell_s2h = active_h & ((1 - dir_ph) >= DIR_THRESHOLD)
-        s2_bph   = (lbl_h[buy_s2h] == 1).mean() if buy_s2h.sum() > 0 else np.nan
-        s2_sph   = (lbl_h[sell_s2h] == -1).mean() if sell_s2h.sum() > 0 else np.nan
+    val_buy_p,  val_buy_y  = _collect_meta_probas(val_data,  1)
+    val_sell_p, val_sell_y = _collect_meta_probas(val_data, -1)
 
-        # Stage 3: meta pre-filter
-        pre_buy  = active_h & (dir_ph >= BASE_PRE_FILTER)
-        pre_sell = active_h & (dir_ph <= 1 - BASE_PRE_FILTER)
+    vbn, vbw, vsn, vsw = _collect_stage2(val_data)
+    print(f"\n  Stage 2 on val set:  BUY {vbn} sigs {vbw/vbn:.1%}" if vbn else "  BUY: 0", end="")
+    print(f"  |  SELL {vsn} sigs {vsw/vsn:.1%}" if vsn else "  |  SELL: 0")
 
-        buy_n = buy_win = 0; sell_n = sell_win = 0
-        if meta_buy_model is not None and pre_buy.sum() > 0:
-            Xm   = np.column_stack([X_hd[pre_buy].values,
-                                     dir_ph[pre_buy], hold_ph[pre_buy]])
-            raw  = meta_buy_model.predict_proba(Xm)[:, 1]
-            cal  = meta_buy_cal.predict(raw)
-            all_meta_buy_p.extend(cal.tolist())
-            all_meta_buy_y.extend((lbl_h[pre_buy] == 1).astype(int).tolist())
-
-        if meta_sell_model is not None and pre_sell.sum() > 0:
-            Xm   = np.column_stack([X_hd[pre_sell].values,
-                                     dir_ph[pre_sell], hold_ph[pre_sell]])
-            raw  = meta_sell_model.predict_proba(Xm)[:, 1]
-            cal  = meta_sell_cal.predict(raw)
-            all_meta_sell_p.extend(cal.tolist())
-            all_meta_sell_y.extend((lbl_h[pre_sell] == -1).astype(int).tolist())
-
-        sym_results.append({"sym": sym,
-                            "buy_s2n": int(buy_s2h.sum()), "buy_s2p": s2_bph,
-                            "sell_s2n": int(sell_s2h.sum()), "sell_s2p": s2_sph})
-
-    # Print Stage 2 holdout summary
-    s2_buy_tot  = sum(r["buy_s2n"]  for r in sym_results)
-    s2_sell_tot = sum(r["sell_s2n"] for r in sym_results)
-    valid_bp    = [r["buy_s2p"]  for r in sym_results if not np.isnan(r.get("buy_s2p", float("nan")))]
-    valid_sp    = [r["sell_s2p"] for r in sym_results if not np.isnan(r.get("sell_s2p", float("nan")))]
-    print(f"\n  Stage 2 only (threshold={DIR_THRESHOLD:.2f}) on holdout:")
-    print(f"    BUY  {s2_buy_tot:>5} signals  avg_prec={np.mean(valid_bp):.1%}" if valid_bp else "    BUY: no signals")
-    print(f"    SELL {s2_sell_tot:>5} signals  avg_prec={np.mean(valid_sp):.1%}" if valid_sp else "    SELL: no signals")
-
-    # Fine-grained threshold sweep (0.01 steps) with minimum-signal constraint
     def _sweep(proba_arr, label_arr, name, min_sigs: int = 10) -> float:
-        if not proba_arr or not label_arr:
+        if not proba_arr:
             print(f"\n  {name}: no data"); return 0.75
         p  = np.array(proba_arr); y_ = np.array(label_arr)
-        print(f"\n  {name} ({len(p)} holdout bars, base_rate={y_.mean():.1%}, "
-              f"min_sigs={min_sigs}):")
+        print(f"\n  {name} ({len(p)} val bars, base_rate={y_.mean():.1%}, min_sigs={min_sigs}):")
         print(f"    {'Thr':>5}  {'N':>6}  {'Precision':>10}  {'Recall':>8}")
         best_thr = 0.75; best_prec = 0.0; found_80 = False
-        # Coarse pass to find interesting region, then fine-grained around it
         for thr in list(np.arange(0.50, 0.97, 0.01)):
-            emit = p >= thr
-            n = emit.sum()
-            if n < min_sigs: break      # enforce minimum signal count
-            pr   = precision_score(y_, emit.astype(int), zero_division=0)
-            rec  = emit[y_ == 1].mean() if y_.sum() > 0 else 0
-            flag = "  ← 80% ✓" if pr >= 0.80 and not found_80 else ""
+            emit = p >= thr; n = int(emit.sum())
+            if n < min_sigs: break
+            pr  = precision_score(y_, emit.astype(int), zero_division=0)
+            rec = emit[y_ == 1].mean() if y_.sum() > 0 else 0
+            flag = "  <- 80% ✓" if pr >= 0.80 and not found_80 else ""
             if thr in np.arange(0.50, 0.97, 0.05) or pr >= 0.78 or n <= min_sigs + 20:
                 print(f"    {thr:>5.2f}  {n:>6}  {pr:>10.1%}  {rec:>8.1%}{flag}")
-            if pr >= 0.80 and not found_80:
-                found_80 = True
-            if pr > best_prec:
-                best_prec = pr; best_thr = thr
+            if pr >= 0.80 and not found_80: found_80 = True
+            if pr > best_prec: best_prec = pr; best_thr = thr
         if not found_80:
             print(f"    [80% NOT reached -- best: {best_prec:.1%} @ {best_thr:.2f}]")
         return best_thr
 
-    best_buy_thr  = _sweep(all_meta_buy_p,  all_meta_buy_y,  "Meta-BUY  holdout", min_sigs=10)
+    best_buy_thr  = _sweep(val_buy_p,  val_buy_y,  "Meta-BUY  val",  min_sigs=10)
     best_sell_thr = max(META_SELL_FLOOR,
-                        _sweep(all_meta_sell_p, all_meta_sell_y, "Meta-SELL holdout",
+                        _sweep(val_sell_p, val_sell_y, "Meta-SELL val",
                                min_sigs=MIN_SELL_SIGS))
 
-    # Final metrics at best thresholds
-    def _final(proba_arr, label_arr, thr, label_val):
-        if not proba_arr: return 0, 0, 0.0
+    # ── Phase 6b: Unbiased evaluation on TRUE holdout ────────────────────────
+    # Thresholds are now fixed. Holdout never influenced any prior decision.
+    print("\n── Phase 6b: Unbiased evaluation on TRUE holdout ───────────────────")
+
+    hd_buy_p,  hd_buy_y  = _collect_meta_probas(holdout,  1)
+    hd_sell_p, hd_sell_y = _collect_meta_probas(holdout, -1)
+
+    hbn, hbw, hsn, hsw = _collect_stage2(holdout)
+    print(f"\n  Stage 2 on holdout:  BUY {hbn} sigs {hbw/hbn:.1%}" if hbn else "  BUY: 0", end="")
+    print(f"  |  SELL {hsn} sigs {hsw/hsn:.1%}" if hsn else "  |  SELL: 0")
+
+    def _wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+        """95% Wilson confidence interval for a proportion k/n."""
+        if n == 0: return 0.0, 1.0
+        p = k / n
+        denom = 1 + z**2 / n
+        centre = (p + z**2 / (2 * n)) / denom
+        margin = z * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5) / denom
+        return max(0.0, centre - margin), min(1.0, centre + margin)
+
+    def _report_holdout(proba_arr, label_arr, thr, name):
+        if not proba_arr:
+            print(f"\n  {name}: no holdout data"); return 0, 0, 0.0
         p = np.array(proba_arr); y_ = np.array(label_arr)
-        emit = p >= thr
-        n = int(emit.sum()); win = int((emit & (y_ == 1)).sum())
-        prec = win/n if n > 0 else 0.0
+        emit = p >= thr; n = int(emit.sum())
+        win  = int((emit & (y_ == 1)).sum())
+        prec = win / n if n > 0 else 0.0
+        lo, hi = _wilson_ci(win, n)
+        ok = "✓" if prec >= 0.80 else "✗"
+        print(f"\n  {ok} {name}: {win}/{n} = {prec:.1%}  "
+              f"95% CI [{lo:.1%}, {hi:.1%}]  (thr={thr:.2f})")
         return n, win, prec
 
-    buy_n, buy_win, buy_prec   = _final(all_meta_buy_p,  all_meta_buy_y,  best_buy_thr, 1)
-    sell_n, sell_win, sell_prec = _final(all_meta_sell_p, all_meta_sell_y, best_sell_thr, 1)
-
-    print(f"\n  Final at chosen thresholds:")
-    print(f"    BUY  {buy_win}/{buy_n} = {buy_prec:.1%}  (meta_thr={best_buy_thr:.2f})")
-    print(f"    SELL {sell_win}/{sell_n} = {sell_prec:.1%}  (meta_thr={best_sell_thr:.2f})")
+    buy_n, buy_win, buy_prec   = _report_holdout(hd_buy_p,  hd_buy_y,  best_buy_thr,  "BUY ")
+    sell_n, sell_win, sell_prec = _report_holdout(hd_sell_p, hd_sell_y, best_sell_thr, "SELL")
 
     # ── Save ──────────────────────────────────────────────────────────────
     blob = {
@@ -749,10 +762,15 @@ def train(syms: list[str], test_mode: bool = False) -> None:
     joblib.dump(blob, MODEL_PATH_V3, compress=3)
     print(f"\n✓ Saved: {MODEL_PATH_V3}"
           f"  ({MODEL_PATH_V3.stat().st_size/1e6:.1f} MB)")
-    print(f"  BUY  precision on holdout OOT: {buy_prec:.1%} @ meta_thr={best_buy_thr:.2f}")
-    print(f"  SELL precision on holdout OOT: {sell_prec:.1%} @ meta_thr={best_sell_thr:.2f}")
+    print(f"  BUY  unbiased holdout: {buy_prec:.1%}  ({buy_win}/{buy_n})  "
+          f"@ meta_thr={best_buy_thr:.2f}  (thr tuned on val set)")
+    print(f"  SELL unbiased holdout: {sell_prec:.1%}  ({sell_win}/{sell_n})  "
+          f"@ meta_thr={best_sell_thr:.2f}  (thr tuned on val set)")
+    lo_b, hi_b   = _wilson_ci(buy_win,  buy_n)
+    lo_s, hi_s   = _wilson_ci(sell_win, sell_n)
+    print(f"  95% CI:  BUY [{lo_b:.1%}, {hi_b:.1%}]  |  SELL [{lo_s:.1%}, {hi_s:.1%}]")
     if buy_prec >= 0.80:
-        print(f"\n  ✓ 80% BUY precision ACHIEVED on holdout OOT!")
+        print(f"\n  ✓ 80% BUY precision ACHIEVED on unbiased holdout!")
     else:
         print(f"\n  Best BUY: {buy_prec:.1%}  (gap to 80%: {0.80-buy_prec:.1%})")
 
@@ -1061,7 +1079,7 @@ def _cmd_oot2(syms: list[str] | None = None) -> None:
     print("=" * 65)
     print(f"  OOT2 — intraday_model_v3 v{version}  bar-by-bar holdout replay")
     print("=" * 65)
-    print(f"  Symbols: {len(sym_list)}  |  Holdout = last 15% per symbol  |  "
+    print(f"  Symbols: {len(sym_list)}  |  Holdout = last 10% (thresholds tuned on val)  |  "
           f"TARGET_BARS={TARGET_BARS}\n")
 
     all_rows: list[dict] = []
@@ -1090,12 +1108,12 @@ def _cmd_oot2(syms: list[str] | None = None) -> None:
         # ATR-relative labels on full data
         labels = make_labels_atr(raw_a)
 
-        # Holdout = last 15%
+        # True holdout = last 10% (same split as training)
         n      = len(feats)
-        t2     = int(n * (TRAIN_FRAC + META_FRAC))
-        hd_f   = feats.iloc[t2:]
-        hd_raw = raw_a.iloc[t2:]
-        hd_lbl = labels.iloc[t2:]
+        t3     = int(n * (TRAIN_FRAC + META_FRAC + VAL_FRAC))
+        hd_f   = feats.iloc[t3:]
+        hd_raw = raw_a.iloc[t3:]
+        hd_lbl = labels.iloc[t3:]
 
         if len(hd_f) < TARGET_BARS + 5:
             skipped += 1; continue
@@ -1181,18 +1199,26 @@ def _cmd_oot2(syms: list[str] | None = None) -> None:
     print()
     print("── OOT2 Summary ─────────────────────────────────────────────────────")
 
+    def _wilson(k, n, z=1.96):
+        if n == 0: return 0.0, 1.0
+        p = k / n; d = 1 + z**2 / n
+        c = (p + z**2 / (2*n)) / d
+        m = z * ((p*(1-p)/n + z**2/(4*n**2))**0.5) / d
+        return max(0.0, c-m), min(1.0, c+m)
+
     def _report(label: str, sub: pd.DataFrame) -> None:
         if sub.empty:
             print(f"  — {label}: no signals")
             return
-        n_ok  = sub["correct"].sum()
+        n_ok  = int(sub["correct"].sum())
         n_sig = len(sub)
         prec  = n_ok / n_sig
         avg_b = sub["best_ret"].mean()
         avg_w = sub["worst_ret"].mean()
+        lo, hi = _wilson(n_ok, n_sig)
         ok_s  = "✓" if prec >= 0.80 else "✗"
         print(f"  {ok_s} {label:<25} {n_ok:>2}/{n_sig:<2} = {prec:>5.1%}  "
-              f"avg_best={avg_b:+.2f}%  avg_worst={avg_w:+.2f}%")
+              f"CI[{lo:.0%},{hi:.0%}]  best={avg_b:+.2f}%  worst={avg_w:+.2f}%")
 
     _report("BUY  (meta-classifier)",  df[(df["signal"] == "BUY")  & ~df["premium"]])
     _report("BUY  (⭐ Premium rule)",   df[(df["signal"] == "BUY")  &  df["premium"]])
