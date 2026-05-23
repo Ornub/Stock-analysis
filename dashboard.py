@@ -1673,7 +1673,7 @@ elif vol_regime in ("HIGH", "EXTREME"):
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dashboard", "Portfolio", "Sectors", "Deep Dive", "Intraday"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Dashboard", "Portfolio", "Sectors", "Deep Dive", "Intraday", "Backtest"])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3531,6 +3531,151 @@ with tab5:
                             )
         except Exception:
             st.caption("Signal log unavailable.")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TAB 6 — BACKTEST (₹100 Intraday Simulator)
+# ═══════════════════════════════════════════════════════════════════════
+
+with tab6:
+    st.markdown(
+        "<h3 style='margin-bottom:4px'>📊 Intraday Backtest — ₹100 Simulator</h3>"
+        "<p style='color:#64748b;font-size:0.82rem;margin-top:0'>Equal-weight daily allocation · "
+        "0.10% round-trip brokerage · Exit: target / stop / 8-bar close · True OOT holdout</p>",
+        unsafe_allow_html=True,
+    )
+
+    _bt_c1, _bt_c2, _bt_c3 = st.columns([1, 1, 2])
+    _bt_capital  = _bt_c1.number_input("Starting Capital (₹)", min_value=10, max_value=100000,
+                                        value=100, step=10)
+    _bt_window   = _bt_c2.selectbox("Data Window", ["OOT only (honest)", "All data (in-sample)"],
+                                     index=0)
+    _bt_run      = _bt_c3.button("▶ Run Backtest", use_container_width=False,
+                                  help="Replay v6.0 model signals on 5-min bars, allocate capital equally across same-day signals")
+
+    if _bt_run or st.session_state.get("_bt_result"):
+
+        if _bt_run:
+            with st.spinner("Running backtest…"):
+                import subprocess, json as _json, sys as _sys
+                _all_flag = ["--all-data"] if "All data" in _bt_window else []
+                _proc = subprocess.run(
+                    [_sys.executable, "backtest_intraday.py",
+                     "--capital", str(_bt_capital), "--json"] + _all_flag,
+                    capture_output=True, text=True, cwd=str(Path(__file__).parent),
+                )
+                try:
+                    _bt_result = _json.loads(_proc.stdout)
+                    st.session_state["_bt_result"] = _bt_result
+                except Exception:
+                    st.error(f"Backtest failed:\n```\n{_proc.stderr[-800:]}\n```")
+                    _bt_result = None
+        else:
+            _bt_result = st.session_state.get("_bt_result")
+
+        if _bt_result:
+            _trades   = _bt_result.get("trades", [])
+            _daily    = _bt_result.get("daily", [])
+            _weekly   = _bt_result.get("weekly", [])
+            _summary  = _bt_result.get("summary", {})
+
+            # ── KPI strip ────────────────────────────────────────────────
+            _km1, _km2, _km3, _km4, _km5 = st.columns(5)
+            _tot_ret = _summary.get("total_return_pct", 0)
+            _wk_ret  = _summary.get("avg_week_pct", 0)
+            _wr      = _summary.get("win_rate_pct", 0)
+            _n_tr    = _summary.get("n_trades", 0)
+            _final   = _summary.get("final_capital", _bt_capital)
+            _km1.metric("Total Return",   f"{_tot_ret:+.2f}%", delta=f"₹{_final:.2f} final")
+            _km2.metric("Avg / Week",     f"{_wk_ret:+.2f}%")
+            _km3.metric("Win Rate",       f"{_wr:.1f}%")
+            _km4.metric("Total Trades",   str(_n_tr))
+            _km5.metric("Period",         _summary.get("period", "—"))
+
+            # ── Daily P&L chart (Plotly) ─────────────────────────────────
+            if _daily:
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots as _msp
+
+                _dates   = [r["date"] for r in _daily]
+                _day_ret = [r["day_ret"] for r in _daily]
+                _cap_ser = [r["capital"] for r in _daily]
+                _colors  = ["#26a69a" if v >= 0 else "#ef5350" for v in _day_ret]
+
+                _fig_bt = _msp(rows=2, cols=1, shared_xaxes=True,
+                               row_heights=[0.45, 0.55], vertical_spacing=0.06)
+
+                _fig_bt.add_trace(go.Bar(
+                    x=_dates, y=_day_ret, marker_color=_colors,
+                    name="Day Return %", showlegend=False,
+                ), row=1, col=1)
+
+                _fig_bt.add_trace(go.Scatter(
+                    x=_dates, y=_cap_ser, mode="lines+markers",
+                    line=dict(color="#89b4fa", width=2),
+                    marker=dict(size=5, color="#89b4fa"),
+                    fill="tozeroy", fillcolor="rgba(137,180,250,0.10)",
+                    name="Capital ₹",
+                ), row=2, col=1)
+
+                _fig_bt.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)",
+                                  row=1, col=1)
+                _fig_bt.add_hline(y=_bt_capital, line_dash="dot",
+                                  line_color="rgba(137,180,250,0.3)", row=2, col=1)
+
+                _fig_bt.update_layout(
+                    height=480,
+                    paper_bgcolor="rgba(17,24,39,0.0)",
+                    plot_bgcolor="rgba(17,24,39,0.6)",
+                    font=dict(color="#94a3b8", size=11),
+                    margin=dict(l=50, r=20, t=10, b=10),
+                    hovermode="x unified",
+                )
+                _fig_bt.update_yaxes(gridcolor="rgba(255,255,255,0.05)",
+                                     ticksuffix="%", row=1, col=1)
+                _fig_bt.update_yaxes(gridcolor="rgba(255,255,255,0.05)",
+                                     tickprefix="₹", row=2, col=1)
+                _fig_bt.update_xaxes(gridcolor="rgba(255,255,255,0.04)")
+
+                st.plotly_chart(_fig_bt, use_container_width=True)
+
+            # ── Weekly table ─────────────────────────────────────────────
+            if _weekly:
+                st.markdown(
+                    "<div style='font-size:0.72rem;font-weight:700;color:#64748b;"
+                    "margin:12px 0 6px'>WEEKLY SUMMARY</div>",
+                    unsafe_allow_html=True,
+                )
+                _wk_df = pd.DataFrame(_weekly)
+                _wk_df = _wk_df.rename(columns={
+                    "week": "Week", "days": "Days", "trades": "Trades",
+                    "win_rate_pct": "Win %", "week_ret": "Week Return %",
+                    "capital": "Capital ₹",
+                })
+                if "Week Return %" in _wk_df.columns:
+                    _wk_df["Week Return %"] = _wk_df["Week Return %"].map(lambda x: f"{x:+.2f}%")
+                if "Win %" in _wk_df.columns:
+                    _wk_df["Win %"] = _wk_df["Win %"].map(lambda x: f"{x:.0f}%")
+                if "Capital ₹" in _wk_df.columns:
+                    _wk_df["Capital ₹"] = _wk_df["Capital ₹"].map(lambda x: f"₹{x:.2f}")
+                st.dataframe(_wk_df, use_container_width=True, hide_index=True)
+
+            # ── Trade log ────────────────────────────────────────────────
+            with st.expander("📋 Full Trade Log", expanded=False):
+                if _trades:
+                    _tr_df = pd.DataFrame(_trades)
+                    _tr_show = _tr_df[["date", "symbol", "signal", "entry", "exit_price",
+                                       "exit_why", "gross_pct", "net_pct"]].copy()
+                    _tr_show.columns = ["Date", "Symbol", "Signal", "Entry", "Exit",
+                                         "Exit Why", "Gross %", "Net %"]
+                    _tr_show["Gross %"] = _tr_show["Gross %"].map(lambda x: f"{x:+.2f}%")
+                    _tr_show["Net %"]   = _tr_show["Net %"].map(lambda x: f"{x:+.2f}%")
+                    st.dataframe(_tr_show, use_container_width=True, hide_index=True, height=400)
+                else:
+                    st.caption("No trades in this window.")
+
+    else:
+        st.info("Click **▶ Run Backtest** to simulate intraday trading with ₹100 starting capital.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
