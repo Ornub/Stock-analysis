@@ -884,6 +884,16 @@ def predict(symbol: str) -> dict:
     elif meta_signal == "SELL" and nifty_day > REGIME_THRESHOLD:
         meta_signal = "HOLD"; meta_conf = 0.0; regime_suppressed = True
 
+    # Results day filter: no signals on earnings/board-meeting announcement day
+    results_day = False
+    if meta_signal != "HOLD":
+        try:
+            from results_calendar import is_results_day
+            if is_results_day(symbol):
+                meta_signal = "HOLD"; meta_conf = 0.0; results_day = True
+        except Exception:
+            pass
+
     # Stop loss and target (ATR-based)
     # Premium BUY  : tight stop (1.0* ATR), generous target (1.5* ATR) -> R:R 1:1.5
     # Meta-SELL    : wider stop (1.5* ATR), target (2.0* ATR)           -> R:R 1:1.33
@@ -912,6 +922,7 @@ def predict(symbol: str) -> dict:
         "rr":           rr,
         "nifty_day_ret":     round(nifty_day, 4),
         "regime_suppressed": regime_suppressed,
+        "results_day":       results_day,
         "buy_thr":      round(buy_thr, 3),
         "sell_thr":     round(sell_thr, 3),
         "data_ok":      True,

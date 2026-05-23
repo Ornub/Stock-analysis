@@ -90,6 +90,8 @@ def run_scan() -> list[dict]:
     for sym, r in results.items():
         sig = r.get("signal", "HOLD")
         if sig == "HOLD" or not r.get("data_ok", True):
+            if r.get("results_day") and not QUIET:
+                print(f"[{datetime.now():%H:%M}] {sym}: signal suppressed — results day")
             continue
 
         sid = log_signal(
@@ -157,6 +159,28 @@ def maybe_send_eod() -> None:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
+_last_calendar_refresh: date | None = None
+
+
+def _refresh_results_calendar() -> None:
+    """Refresh the NSE results calendar once per calendar day."""
+    global _last_calendar_refresh
+    today = datetime.now().date()
+    if _last_calendar_refresh == today:
+        return
+    _last_calendar_refresh = today
+    try:
+        from results_calendar import refresh, get_results_today
+        n = refresh()
+        syms = get_results_today()
+        msg = f"[daemon] results calendar: {n} symbols loaded"
+        if syms:
+            msg += f"  — today: {', '.join(syms)}"
+        print(msg)
+    except Exception as exc:
+        print(f"[daemon] results calendar refresh failed: {exc}")
+
+
 def main() -> None:
     parts = [f"{len(SYMBOLS)} symbols", f"interval={args.interval}m",
              f"alerts={'ON' if is_configured() else 'OFF'}",
@@ -165,6 +189,8 @@ def main() -> None:
     print(f"[daemon] started — {', '.join(parts)}")
     if not is_configured():
         print("[daemon] tip: add WHATSAPP_PHONE + WHATSAPP_APIKEY to .env")
+
+    _refresh_results_calendar()   # load at startup
 
     while _running:
         ms = market_status()
@@ -178,6 +204,8 @@ def main() -> None:
                     print(f"[{datetime.now():%H:%M}] market closed — sleeping {args.interval}m")
                 time.sleep(INTERVAL_S)
                 continue
+
+        _refresh_results_calendar()   # refresh once per calendar day
 
         ts = datetime.now().strftime("%H:%M")
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=Stock Signal Scanner Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/Stock-analysis
+ExecStart=/usr/bin/python3 /home/user/Stock-analysis/scanner_daemon.py
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:/home/user/Stock-analysis/logs/scanner.log
+StandardError=append:/home/user/Stock-analysis/logs/scanner.log
+
+[Install]
+WantedBy=multi-user.target
